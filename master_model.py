@@ -26,18 +26,26 @@ from qlib.model.base import Model
 
 
 def zscore(x):
-    return (x - x.mean()).div(x.std())
+    # unbiased std can be 0 or unstable on small batches; eps avoids NaN in CSZscoreNorm
+    return (x - x.mean()) / (x.std(unbiased=False) + 1e-8)
 
 
 def drop_extreme(x):
     sorted_tensor, indices = x.sort()
     N = x.shape[0]
     percent_2_5 = int(0.025 * N)
-    # Exclude top 2.5% and bottom 2.5% values
-    filtered_indices = indices[percent_2_5:-percent_2_5]
+    # Exclude top 2.5% and bottom 2.5% values.
+    # Must use [k : N-k], not [k:-k]: when k==0, x[0:-0] is an empty slice in Python.
+    filtered_indices = indices[percent_2_5 : N - percent_2_5]
     mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
     mask[filtered_indices] = True
     return mask, x[mask]
+
+
+def _qlib_sample_index(data_source):
+    """TSDataSampler.get_index() or plain tabular index (datetime, instrument)."""
+    gi = getattr(data_source, "get_index", None)
+    return gi() if callable(gi) else data_source.index
 
 
 def drop_na(x):
@@ -245,7 +253,7 @@ class DailyBatchSamplerRandom(Sampler):
     def __init__(self, data_source, shuffle=False):
         self.data_source = data_source
         self.shuffle = shuffle
-        self.daily_count = pd.Series(index=self.data_source.get_index()).groupby("datetime").size().values
+        self.daily_count = pd.Series(index=_qlib_sample_index(self.data_source)).groupby("datetime").size().values
         self.daily_index = np.roll(np.cumsum(self.daily_count), 1)
         self.daily_index[0] = 0
 
@@ -344,10 +352,12 @@ class MASTERModel(Model):
             label = data[:, -1, -1].to(self.device)
 
             mask, label = drop_extreme(label)
+            if label.numel() < 2:
+                continue
             feature = feature[mask, :, :]
             label = zscore(label)  # CSZscoreNorm
-
-            assert not torch.any(torch.isnan(label))
+            if not torch.all(torch.isfinite(label)):
+                continue
 
             pred = self.model(feature.float())
             loss = self.loss_fn(pred, label)
@@ -358,6 +368,10 @@ class MASTERModel(Model):
             torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
             self.train_optimizer.step()
 
+        if not losses:
+            raise RuntimeError(
+                "No training batches had valid labels after filtering; check data/labels."
+            )
         return float(np.mean(losses))
 
     def test_epoch(self, data_loader):
@@ -432,5 +446,5 @@ class MASTERModel(Model):
                 pred = self.model(feature.float()).detach().cpu().numpy()
             pred_all.append(pred.ravel())
 
-        pred_all = pd.DataFrame(np.concatenate(pred_all), index=dl_test.get_index())
+        pred_all = pd.DataFrame(np.concatenate(pred_all), index=_qlib_sample_index(dl_test))
         return pred_all

@@ -22,7 +22,7 @@ import yaml
 
 import qlib
 from qlib.config import REG_CN
-from qlib.data.dataset import DatasetH
+from qlib.data.dataset import DatasetH, TSDatasetH
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.utils import init_instance_by_config
 
@@ -39,8 +39,8 @@ DEFAULT_FEATURE_FIELDS = [
     "$low/Ref($close,1)-1",
     "$close/Ref($close,1)-1",
     "$vwap/Ref($close,1)-1",
-    "Ln($volume+1)",
-    "Ln($amount+1)",
+    "Log($volume+1)",
+    "Log($amount+1)",
     "($close-$low)/($high-$low+1e-8)",
     "Ref($close,1)/Ref($close,6)-1",
     "Ref($close,1)/Ref($close,11)-1",
@@ -93,9 +93,9 @@ def build_dataset(
     label_field: str = DEFAULT_LABEL_FIELD,
     label_name: str  = DEFAULT_LABEL_NAME,
     lookback: int = 8,
-) -> DatasetH:
+) -> TSDatasetH:
     """
-    Build a qlib DatasetH with RobustZScoreNorm preprocessing.
+    Build a qlib TSDatasetH (time-series windows + TSDataSampler) with RobustZScoreNorm.
 
     The key fix from qlib-update (pytorch_master_ts.py):
       - learn_processors  → used for training data  (DK_L)
@@ -113,8 +113,7 @@ def build_dataset(
         "kwargs": {
             "start_time": data_start,
             "end_time": data_end,
-            "fit_start_time": fit_start,
-            "fit_end_time": fit_end,
+            # fit_* belong on RobustZScoreNorm only; DataHandler rejects them.
             "instruments": instruments,
             "data_loader": {
                 "class": "QlibDataLoader",
@@ -142,7 +141,7 @@ def build_dataset(
     }
 
     dataset_config = {
-        "class": "DatasetH",
+        "class": "TSDatasetH",
         "module_path": "qlib.data.dataset",
         "kwargs": {
             "handler": handler_config,
@@ -258,6 +257,9 @@ def main():
         """Return cli_val if set, else walk yaml_keys path, else fallback."""
         if cli_val is not None:
             return cli_val
+        if not yaml_keys:
+            # Empty path must not return the whole yaml_cfg (used for CLI-only segment dates).
+            return fallback
         node = yaml_cfg
         for k in yaml_keys:
             if not isinstance(node, dict) or k not in node:
@@ -273,8 +275,8 @@ def main():
     dh = yaml_cfg.get("data_handler_config", {})
     data_start  = _get(args.data_start,  ["data_handler_config", "start_time"],      "2010-01-01")
     data_end    = _get(args.data_end,    ["data_handler_config", "end_time"],         "2023-12-31")
-    fit_start   = _get(None,             ["data_handler_config", "fit_start_time"],   "2010-01-01")
-    fit_end     = _get(None,             ["data_handler_config", "fit_end_time"],     "2019-12-31")
+    fit_start   = _get(None,             ["fit_start"],   "2010-01-01")
+    fit_end     = _get(None,             ["fit_end"],     "2019-12-31")
 
     # segment dates from task.dataset.kwargs.segments
     seg = yaml_cfg.get("task", {}).get("dataset", {}).get("kwargs", {}).get("segments", {})
@@ -317,7 +319,7 @@ def main():
     qlib.init(provider_uri=data_path, region=REG_CN)
 
     # ------------------------------------------------------------------
-    # 2. Build the dataset (DatasetH)
+    # 2. Build TSDatasetH (time-series windows; prepare() → TSDataSampler)
     # ------------------------------------------------------------------
     print(f"Building dataset   instrument={instrument}  "
           f"train={train_start}~{train_end}  "

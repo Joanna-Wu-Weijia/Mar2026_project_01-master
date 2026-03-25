@@ -16,15 +16,15 @@ def calc_ic(pred, label):
 
 
 def zscore(x):
-    return (x - x.mean()).div(x.std())
+    return (x - x.mean()) / (x.std(unbiased=False) + 1e-8)
 
 
 def drop_extreme(x):
     sorted_tensor, indices = x.sort()
     N = x.shape[0]
     percent_2_5 = int(0.025 * N)
-    # Exclude top 2.5% and bottom 2.5% values
-    filtered_indices = indices[percent_2_5:-percent_2_5]
+    # Use [k : N-k] — when k==0, indices[0:-0] is an empty slice.
+    filtered_indices = indices[percent_2_5 : N - percent_2_5]
     mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
     mask[filtered_indices] = True
     return mask, x[mask]
@@ -35,12 +35,17 @@ def drop_na(x):
     return mask, x[mask]
 
 
+def _qlib_sample_index(data_source):
+    gi = getattr(data_source, "get_index", None)
+    return gi() if callable(gi) else data_source.index
+
+
 class DailyBatchSamplerRandom(Sampler):
     def __init__(self, data_source, shuffle=False):
         self.data_source = data_source
         self.shuffle = shuffle
         # calculate number of samples in each batch
-        self.daily_count = pd.Series(index=self.data_source.get_index()).groupby("datetime").size().values
+        self.daily_count = pd.Series(index=_qlib_sample_index(self.data_source)).groupby("datetime").size().values
         self.daily_index = np.roll(np.cumsum(self.daily_count), 1)  # calculate begin index of each batch
         self.daily_index[0] = 0
 
@@ -107,8 +112,12 @@ class SequenceModel:
             label = data[:, -1, -1].to(self.device)
 
             mask, label = drop_extreme(label)
+            if label.numel() < 2:
+                continue
             feature = feature[mask, :, :]
             label = zscore(label)  # CSZscoreNorm
+            if not torch.all(torch.isfinite(label)):
+                continue
 
             pred = self.model(feature.float())
             loss = self.loss_fn(pred, label)
@@ -119,6 +128,10 @@ class SequenceModel:
             torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
             self.train_optimizer.step()
 
+        if not losses:
+            raise RuntimeError(
+                "No training batches had valid labels after filtering; check data/labels."
+            )
         return float(np.mean(losses))
 
     def test_epoch(self, data_loader):
@@ -192,7 +205,7 @@ class SequenceModel:
             ic.append(daily_ic)
             ric.append(daily_ric)
 
-        predictions = pd.Series(np.concatenate(preds), index=dl_test.get_index())
+        predictions = pd.Series(np.concatenate(preds), index=_qlib_sample_index(dl_test))
 
         metrics = {
             'IC': np.mean(ic),

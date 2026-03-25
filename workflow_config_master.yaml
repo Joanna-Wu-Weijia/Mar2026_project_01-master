@@ -12,7 +12,12 @@ qlib_init:
     region: cn
 
 market: &market csi300
-benchmark: &benchmark sh000300           
+benchmark: &benchmark sh000300
+
+# RobustZScoreNorm fit window (anchors for processors below). Do not put these on DataHandlerLP —
+# recent qlib passes unknown kwargs to DataHandler, which does not accept fit_*.
+fit_start: &fit_start 2010-01-04
+fit_end:   &fit_end   2022-12-31
 
 # ---------------------------------------------------------------------------
 # Data handler — 10 features derived from the available binary fields
@@ -20,8 +25,6 @@ benchmark: &benchmark sh000300
 data_handler_config: &data_handler_config
     start_time: 2010-01-04
     end_time: 2026-03-20
-    fit_start_time: &fit_start 2010-01-04
-    fit_end_time:   &fit_end   2022-12-31
     instruments: *market
     data_loader:
         class: QlibDataLoader
@@ -33,8 +36,8 @@ data_handler_config: &data_handler_config
                       - "$low/Ref($close,1)-1"            # LOW_RET
                       - "$close/Ref($close,1)-1"          # CLOSE_RET
                       - "$vwap/Ref($close,1)-1"           # VWAP_RET
-                      - "Ln($volume+1)"                   # LOG_VOL
-                      - "Ln($amount+1)"                   # LOG_AMT
+                      - "Log($volume+1)"                   # LOG_VOL
+                      - "Log($amount+1)"                   # LOG_AMT
                       - "($close-$low)/($high-$low+1e-8)" # INTRADAY
                       - "Ref($close,1)/Ref($close,6)-1"   # MOM5
                       - "Ref($close,1)/Ref($close,11)-1"  # MOM10
@@ -101,7 +104,7 @@ task:
             save_prefix: *market
 
     dataset:
-        class: DatasetH
+        class: TSDatasetH
         module_path: qlib.data.dataset
         kwargs:
             handler:
