@@ -16,11 +16,11 @@
 #   python run_qlib.py --config workflow_config_master.yaml
 
 qlib_init:
-    provider_uri: ~/Desktop/my_qlib_data   # <-- path to your qlib data folder
+    provider_uri: ~/Desktop/my_qlib_data  
     region: cn
 
 market: &market csi300
-benchmark: &benchmark sh000300            # CSI 300 index code in qlib
+benchmark: &benchmark sh000300           
 
 # ---------------------------------------------------------------------------
 # Data handler — 10 features derived from the available binary fields
