@@ -1,7 +1,7 @@
 """
-run_qlib.py — Train and evaluate the MASTER model using your local qlib data.
+run_qlib.py
 
-Two ways to configure:
+Two ways to run:
   1. Pass a YAML config file (recommended — mirrors the qlib workflow):
        python run_qlib.py --config workflow_config_master.yaml
 

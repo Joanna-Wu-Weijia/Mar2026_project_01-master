@@ -1,11 +1,5 @@
 # MASTER configuration file
-# Adapted from SJTU-DMTai/MASTER  qlib-update/workflow_config_master_Alpha158.yaml
-#
-# This file is read by run_qlib.py:
 #   python run_qlib.py --config workflow_config_master.yaml
-#
-# Edit the values below to match your setup, then run the command above.
-# CLI args passed to run_qlib.py override individual values here.
 
 qlib_init:
     provider_uri: ~/Desktop/my_qlib_data  

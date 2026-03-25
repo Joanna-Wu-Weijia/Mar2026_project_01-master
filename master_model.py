@@ -1,10 +1,5 @@
 # Adapted from SJTU-DMTai/MASTER qlib-update/pytorch_master_ts.py
-#
-# Key modifications from the original:
-#   1. Changed relative qlib imports to absolute imports (standalone use)
-#   2. Added no-gate mode: when gate_input_start_index == gate_input_end_index,
-#      the market-feature gate is skipped (for data without market info features)
-#   3. Updated defaults to match a 10-feature dataset (d_feat=10, no gate)
+
 
 import numpy as np
 import pandas as pd
