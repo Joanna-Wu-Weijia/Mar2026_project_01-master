@@ -18,10 +18,10 @@ benchmark: &benchmark sh000300
 # Data handler — 10 features derived from the available binary fields
 # ---------------------------------------------------------------------------
 data_handler_config: &data_handler_config
-    start_time: 2010-01-01
-    end_time: 2023-12-31
-    fit_start_time: &fit_start 2010-01-01  # normalisation stats fitted on training period
-    fit_end_time:   &fit_end   2019-12-31
+    start_time: 2010-01-04
+    end_time: 2026-03-20
+    fit_start_time: &fit_start 2010-01-04
+    fit_end_time:   &fit_end   2022-12-31
     instruments: *market
     data_loader:
         class: QlibDataLoader
@@ -109,7 +109,7 @@ task:
                 module_path: qlib.data.dataset.handler
                 kwargs: *data_handler_config
             segments:
-                train: [2010-01-01, 2019-12-31]
-                valid: [2020-01-01, 2020-12-31]
-                test:  [2021-01-01, 2023-12-31]
-            step_len: 8                   # lookback window T (paper default)
+                train: [2010-01-04, 2022-12-31]
+                valid: [2023-01-01, 2024-12-31]
+                test:  [2025-01-01, 2026-03-20]
+            step_len: 8                  
