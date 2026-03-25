@@ -1,19 +1,11 @@
-# MASTER workflow config — adapted from SJTU-DMTai/MASTER qlib-update/workflow_config_master_Alpha158.yaml
+# MASTER configuration file
+# Adapted from SJTU-DMTai/MASTER  qlib-update/workflow_config_master_Alpha158.yaml
 #
-# Changes from the original:
-#   - provider_uri points to your local qlib data folder
-#   - Alpha158 (158 factors) replaced with DataHandlerLP using 10 OHLCV-derived features
-#     built from the fields you have: close/open/high/low/volume/amount/vwap/change/factor/adjclose
-#   - MASTERTSDatasetH (which merges stock + market-index data) replaced with
-#     standard DatasetH — market gate is disabled in the model accordingly
-#   - market_data_handler_config removed (no separate market-index data needed)
-#   - task.model.module_path set to master_model (local file in this folder)
-#
-# To run with qrun:
-#   PYTHONPATH=. qrun workflow_config_master.yaml
-#
-# To run with the Python script (recommended for local use):
+# This file is read by run_qlib.py:
 #   python run_qlib.py --config workflow_config_master.yaml
+#
+# Edit the values below to match your setup, then run the command above.
+# CLI args passed to run_qlib.py override individual values here.
 
 qlib_init:
     provider_uri: ~/Desktop/my_qlib_data  
@@ -28,8 +20,8 @@ benchmark: &benchmark sh000300
 data_handler_config: &data_handler_config
     start_time: 2010-01-01
     end_time: 2023-12-31
-    fit_start_time: 2010-01-01            # normalization statistics fitted on training period
-    fit_end_time: 2019-12-31
+    fit_start_time: &fit_start 2010-01-01  # normalisation stats fitted on training period
+    fit_end_time:   &fit_end   2019-12-31
     instruments: *market
     data_loader:
         class: QlibDataLoader
@@ -57,14 +49,16 @@ data_handler_config: &data_handler_config
                       - MOM5
                       - MOM10
                 label:
-                    - - "Ref($close,-2)/Ref($close,-1)-1"  # next-day return (label)
+                    - - "Ref($close,-2)/Ref($close,-1)-1"  # next-day return
                     - - LABEL0
             freq: day
     # infer_processors: used for valid and test sets (DK_I)
-    # Statistics are fitted on [fit_start_time, fit_end_time] = training period
+    # fit_start_time / fit_end_time tell RobustZScoreNorm which window to fit on
     infer_processors:
         - class: RobustZScoreNorm
           kwargs:
+              fit_start_time: *fit_start
+              fit_end_time:   *fit_end
               fields_group: feature
               clip_outlier: true
         - class: Fillna
@@ -74,6 +68,8 @@ data_handler_config: &data_handler_config
     learn_processors:
         - class: RobustZScoreNorm
           kwargs:
+              fit_start_time: *fit_start
+              fit_end_time:   *fit_end
               fields_group: feature
               clip_outlier: true
         - class: Fillna
@@ -81,31 +77,12 @@ data_handler_config: &data_handler_config
               fields_group: feature
 
 # ---------------------------------------------------------------------------
-# Portfolio back-test config (optional — used only by PortAnaRecord)
-# ---------------------------------------------------------------------------
-port_analysis_config: &port_analysis_config
-    strategy:
-        class: TopkDropoutStrategy
-        module_path: qlib.contrib.strategy
-        kwargs:
-            signal: <PRED>
-            topk: 30
-            n_drop: 30
-    backtest:
-        start_time: 2021-01-01
-        end_time: 2023-12-31
-        account: 100000000
-        benchmark: *benchmark
-        exchange_kwargs:
-            deal_price: close
-
-# ---------------------------------------------------------------------------
-# Task: model + dataset + records
+# Task: model + dataset
 # ---------------------------------------------------------------------------
 task:
     model:
         class: MASTERModel
-        module_path: master_model         # local master_model.py (add project dir to PYTHONPATH)
+        module_path: master_model
         kwargs:
             seed: 0
             n_epochs: 40
@@ -137,19 +114,3 @@ task:
                 valid: [2020-01-01, 2020-12-31]
                 test:  [2021-01-01, 2023-12-31]
             step_len: 8                   # lookback window T (paper default)
-
-    record:
-        - class: SignalRecord
-          module_path: qlib.workflow.record_temp
-          kwargs:
-              model: <MODEL>
-              dataset: <DATASET>
-        - class: SigAnaRecord
-          module_path: qlib.workflow.record_temp
-          kwargs:
-              ana_long_short: False
-              ann_scaler: 252
-        - class: PortAnaRecord
-          module_path: qlib.workflow.record_temp
-          kwargs:
-              config: *port_analysis_config

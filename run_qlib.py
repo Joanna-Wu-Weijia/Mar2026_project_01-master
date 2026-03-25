@@ -128,12 +128,14 @@ def build_dataset(
             },
             "learn_processors": [
                 {"class": "RobustZScoreNorm",
-                 "kwargs": {"fields_group": "feature", "clip_outlier": True}},
+                 "kwargs": {"fit_start_time": fit_start, "fit_end_time": fit_end,
+                            "fields_group": "feature", "clip_outlier": True}},
                 {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
             ],
             "infer_processors": [
                 {"class": "RobustZScoreNorm",
-                 "kwargs": {"fields_group": "feature", "clip_outlier": True}},
+                 "kwargs": {"fit_start_time": fit_start, "fit_end_time": fit_end,
+                            "fields_group": "feature", "clip_outlier": True}},
                 {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
             ],
         },
