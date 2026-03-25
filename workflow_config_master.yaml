@@ -111,7 +111,6 @@ task:
             n_epochs: 40
             lr: 0.00001
             train_stop_loss_thred: 0.95
-            # 10-feature mode — market gate disabled (start == end == d_feat)
             d_feat: 10
             d_model: 256
             t_nhead: 4
