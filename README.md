@@ -8,13 +8,15 @@ The starting point is `qlib-update/pytorch_master_ts.py` from the original repo,
 
 ## Files
 
-| File | Description |
-|------|-------------|
+| File | Purpose |
+|------|---------|
+| `workflow_config_master.yaml` | **Configuration file** — edit this to set your data path, dates, instrument universe, and model hyperparameters |
+| `run_qlib.py` | **Entry point** — reads the config and runs training/evaluation. Pass `--config workflow_config_master.yaml` |
 | `master_model.py` | MASTER neural net + `MASTERModel` class (adapted from `qlib-update/pytorch_master_ts.py`) |
 | `base_model.py` | `SequenceModel` training framework (unchanged from original repo) |
-| `workflow_config_master.yaml` | **qlib-style YAML config** (mirrors `workflow_config_master_Alpha158.yaml` from the original repo) |
-| `run_qlib.py` | Python runner — reads the YAML config and/or CLI args, trains and evaluates the model |
 | `requirements.txt` | Python dependencies |
+
+`workflow_config_master.yaml` and `run_qlib.py` have different roles — the YAML is configuration, the Python script is execution. Edit the YAML, then run the script.
 
 ---
 
@@ -81,17 +83,15 @@ pip install -r requirements.txt
 
 ## Quick start
 
-### Option 1 — Python script with YAML config (recommended)
+**Step 1**: Edit `workflow_config_master.yaml` — set your data path, dates, and instrument universe.
+
+**Step 2**: Run:
 
 ```bash
-# Edit workflow_config_master.yaml first:
-#   - Set provider_uri to your data folder path
-#   - Adjust market, dates, model hyperparameters as needed
-
 python run_qlib.py --config workflow_config_master.yaml
 ```
 
-You can override individual YAML values from the command line:
+You can override individual YAML values from the command line without editing the file:
 
 ```bash
 python run_qlib.py \
@@ -100,25 +100,6 @@ python run_qlib.py \
     --test_start 2022-01-01 \
     --test_end   2023-12-31 \
     --n_epochs   20
-```
-
-### Option 2 — Python script with CLI args only (no YAML)
-
-```bash
-python run_qlib.py \
-    --data_path ~/Desktop/my_qlib_data \
-    --instrument csi300 \
-    --train_start 2010-01-01 --train_end 2019-12-31 \
-    --valid_start 2020-01-01 --valid_end 2020-12-31 \
-    --test_start  2021-01-01 --test_end  2023-12-31
-```
-
-### Option 3 — qrun (full qlib workflow with experiment tracking)
-
-`qrun` runs the full qlib pipeline including `SignalRecord`, `SigAnaRecord`, and `PortAnaRecord` (portfolio back-test). Our local `master_model.py` is loadable as long as the project directory is on `PYTHONPATH`:
-
-```bash
-PYTHONPATH=. qrun workflow_config_master.yaml
 ```
 
 ---
