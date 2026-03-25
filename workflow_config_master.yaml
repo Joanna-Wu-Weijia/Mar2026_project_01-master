@@ -1,0 +1,155 @@
+# MASTER workflow config — adapted from SJTU-DMTai/MASTER qlib-update/workflow_config_master_Alpha158.yaml
+#
+# Changes from the original:
+#   - provider_uri points to your local qlib data folder
+#   - Alpha158 (158 factors) replaced with DataHandlerLP using 10 OHLCV-derived features
+#     built from the fields you have: close/open/high/low/volume/amount/vwap/change/factor/adjclose
+#   - MASTERTSDatasetH (which merges stock + market-index data) replaced with
+#     standard DatasetH — market gate is disabled in the model accordingly
+#   - market_data_handler_config removed (no separate market-index data needed)
+#   - task.model.module_path set to master_model (local file in this folder)
+#
+# To run with qrun:
+#   PYTHONPATH=. qrun workflow_config_master.yaml
+#
+# To run with the Python script (recommended for local use):
+#   python run_qlib.py --config workflow_config_master.yaml
+
+qlib_init:
+    provider_uri: ~/Desktop/my_qlib_data   # <-- path to your qlib data folder
+    region: cn
+
+market: &market csi300
+benchmark: &benchmark sh000300            # CSI 300 index code in qlib
+
+# ---------------------------------------------------------------------------
+# Data handler — 10 features derived from the available binary fields
+# ---------------------------------------------------------------------------
+data_handler_config: &data_handler_config
+    start_time: 2010-01-01
+    end_time: 2023-12-31
+    fit_start_time: 2010-01-01            # normalization statistics fitted on training period
+    fit_end_time: 2019-12-31
+    instruments: *market
+    data_loader:
+        class: QlibDataLoader
+        kwargs:
+            config:
+                feature:
+                    - - "$open/Ref($close,1)-1"           # OPEN_RET
+                      - "$high/Ref($close,1)-1"           # HIGH_RET
+                      - "$low/Ref($close,1)-1"            # LOW_RET
+                      - "$close/Ref($close,1)-1"          # CLOSE_RET
+                      - "$vwap/Ref($close,1)-1"           # VWAP_RET
+                      - "Ln($volume+1)"                   # LOG_VOL
+                      - "Ln($amount+1)"                   # LOG_AMT
+                      - "($close-$low)/($high-$low+1e-8)" # INTRADAY
+                      - "Ref($close,1)/Ref($close,6)-1"   # MOM5
+                      - "Ref($close,1)/Ref($close,11)-1"  # MOM10
+                    - - OPEN_RET
+                      - HIGH_RET
+                      - LOW_RET
+                      - CLOSE_RET
+                      - VWAP_RET
+                      - LOG_VOL
+                      - LOG_AMT
+                      - INTRADAY
+                      - MOM5
+                      - MOM10
+                label:
+                    - - "Ref($close,-2)/Ref($close,-1)-1"  # next-day return (label)
+                    - - LABEL0
+            freq: day
+    # infer_processors: used for valid and test sets (DK_I)
+    # Statistics are fitted on [fit_start_time, fit_end_time] = training period
+    infer_processors:
+        - class: RobustZScoreNorm
+          kwargs:
+              fields_group: feature
+              clip_outlier: true
+        - class: Fillna
+          kwargs:
+              fields_group: feature
+    # learn_processors: used for training set (DK_L)
+    learn_processors:
+        - class: RobustZScoreNorm
+          kwargs:
+              fields_group: feature
+              clip_outlier: true
+        - class: Fillna
+          kwargs:
+              fields_group: feature
+
+# ---------------------------------------------------------------------------
+# Portfolio back-test config (optional — used only by PortAnaRecord)
+# ---------------------------------------------------------------------------
+port_analysis_config: &port_analysis_config
+    strategy:
+        class: TopkDropoutStrategy
+        module_path: qlib.contrib.strategy
+        kwargs:
+            signal: <PRED>
+            topk: 30
+            n_drop: 30
+    backtest:
+        start_time: 2021-01-01
+        end_time: 2023-12-31
+        account: 100000000
+        benchmark: *benchmark
+        exchange_kwargs:
+            deal_price: close
+
+# ---------------------------------------------------------------------------
+# Task: model + dataset + records
+# ---------------------------------------------------------------------------
+task:
+    model:
+        class: MASTERModel
+        module_path: master_model         # local master_model.py (add project dir to PYTHONPATH)
+        kwargs:
+            seed: 0
+            n_epochs: 40
+            lr: 0.00001
+            train_stop_loss_thred: 0.95
+            # 10-feature mode — market gate disabled (start == end == d_feat)
+            d_feat: 10
+            d_model: 256
+            t_nhead: 4
+            s_nhead: 2
+            gate_input_start_index: 10
+            gate_input_end_index: 10
+            T_dropout_rate: 0.5
+            S_dropout_rate: 0.5
+            GPU: 0
+            save_path: model/
+            save_prefix: *market
+
+    dataset:
+        class: DatasetH
+        module_path: qlib.data.dataset
+        kwargs:
+            handler:
+                class: DataHandlerLP
+                module_path: qlib.data.dataset.handler
+                kwargs: *data_handler_config
+            segments:
+                train: [2010-01-01, 2019-12-31]
+                valid: [2020-01-01, 2020-12-31]
+                test:  [2021-01-01, 2023-12-31]
+            step_len: 8                   # lookback window T (paper default)
+
+    record:
+        - class: SignalRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+              model: <MODEL>
+              dataset: <DATASET>
+        - class: SigAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+              ana_long_short: False
+              ann_scaler: 252
+        - class: PortAnaRecord
+          module_path: qlib.workflow.record_temp
+          kwargs:
+              config: *port_analysis_config

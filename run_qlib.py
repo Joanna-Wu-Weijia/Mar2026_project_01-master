@@ -1,36 +1,16 @@
 """
 run_qlib.py — Train and evaluate the MASTER model using your local qlib data.
 
-Usage:
-    python run_qlib.py [--mode train|predict|both] [--instrument csi300] \
-                       [--data_path ~/Desktop/my_qlib_data] [--seed 0]
+Two ways to configure:
+  1. Pass a YAML config file (recommended — mirrors the qlib workflow):
+       python run_qlib.py --config workflow_config_master.yaml
 
-Your qlib data folder should have the structure:
-    my_qlib_data/
-    ├── calendars/
-    │   └── day.txt          (one trading date per line, e.g. 2010-01-04)
-    ├── features/
-    │   └── <symbol>/        (e.g. sh600000, sz000001, bj430090)
-    │       ├── close.day.bin
-    │       ├── open.day.bin
-    │       ├── high.day.bin
-    │       ├── low.day.bin
-    │       ├── volume.day.bin
-    │       ├── amount.day.bin
-    │       ├── vwap.day.bin
-    │       ├── change.day.bin
-    │       ├── factor.day.bin
-    │       └── adjclose.day.bin
-    └── instruments/
-        ├── all.txt
-        ├── csi300.txt       (symbol  start_date  end_date, tab-separated)
-        ├── csi500.txt
-        └── ...
+  2. Pass CLI arguments directly (overrides YAML values when both given):
+       python run_qlib.py --data_path ~/Desktop/my_qlib_data --instrument csi300
 
-Instruments file format (tab-separated, no header):
-    SH600000    2010-01-04    2023-12-29
-    SZ000001    2010-01-04    2023-12-29
-    ...
+For the full qlib workflow (with experiment tracking and portfolio back-test),
+you can also use qrun directly:
+    PYTHONPATH=. qrun workflow_config_master.yaml
 """
 
 import argparse
@@ -38,6 +18,7 @@ import os
 
 import numpy as np
 import pandas as pd
+import yaml
 
 import qlib
 from qlib.config import REG_CN
@@ -45,26 +26,14 @@ from qlib.data.dataset import DatasetH
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.utils import init_instance_by_config
 
-from master_model import MASTERModel
+from master_model import MASTERModel, DailyBatchSamplerRandom
 
 
 # ---------------------------------------------------------------------------
-# Feature definitions — built from your available fields:
+# Feature definitions — built from the 10 available binary fields:
 #   close, open, high, low, volume, amount, change, factor, vwap, adjclose
-#
-# 10 features total:
-#   OPEN_RET    open-to-previous-close return
-#   HIGH_RET    high-to-previous-close return
-#   LOW_RET     low-to-previous-close return
-#   CLOSE_RET   close return (daily return)
-#   VWAP_RET    vwap-to-previous-close return
-#   LOG_VOL     log(volume + 1)
-#   LOG_AMT     log(amount + 1)
-#   INTRADAY    (close - low) / (high - low)  — intraday price position
-#   MOM5        5-day momentum (yesterday's close vs 5 days ago)
-#   MOM10       10-day momentum (yesterday's close vs 10 days ago)
 # ---------------------------------------------------------------------------
-FEATURE_FIELDS = [
+DEFAULT_FEATURE_FIELDS = [
     "$open/Ref($close,1)-1",
     "$high/Ref($close,1)-1",
     "$low/Ref($close,1)-1",
@@ -76,18 +45,35 @@ FEATURE_FIELDS = [
     "Ref($close,1)/Ref($close,6)-1",
     "Ref($close,1)/Ref($close,11)-1",
 ]
-FEATURE_NAMES = [
+DEFAULT_FEATURE_NAMES = [
     "OPEN_RET", "HIGH_RET", "LOW_RET", "CLOSE_RET", "VWAP_RET",
     "LOG_VOL", "LOG_AMT", "INTRADAY", "MOM5", "MOM10",
 ]
+DEFAULT_LABEL_FIELD = "Ref($close,-2)/Ref($close,-1)-1"
+DEFAULT_LABEL_NAME  = "LABEL0"
 
-# Label: next trading day's return
-#   Ref($close, -2) / Ref($close, -1) - 1
-#   i.e., tomorrow's close / today's close - 1
-LABEL_FIELD = "Ref($close,-2)/Ref($close,-1)-1"
-LABEL_NAME = "LABEL0"
 
-D_FEAT = len(FEATURE_FIELDS)  # 10
+def load_yaml_config(path: str) -> dict:
+    """Load and resolve YAML anchors from a workflow config file."""
+    with open(path, "r") as f:
+        cfg = yaml.safe_load(f)
+    return cfg
+
+
+def extract_feature_lists(data_loader_cfg: dict):
+    """
+    Extract feature expressions and names from a data_loader config dict.
+    Supports both inline lists and pre-resolved dicts from yaml.safe_load.
+    Returns (fields: list[str], names: list[str]).
+    """
+    try:
+        feature_cfg = data_loader_cfg["kwargs"]["config"]["feature"]
+        # yaml.safe_load resolves the nested lists directly
+        fields = feature_cfg[0]
+        names  = feature_cfg[1]
+        return fields, names
+    except (KeyError, IndexError, TypeError):
+        return DEFAULT_FEATURE_FIELDS, DEFAULT_FEATURE_NAMES
 
 
 def build_dataset(
@@ -102,6 +88,10 @@ def build_dataset(
     valid_end: str,
     test_start: str,
     test_end: str,
+    feature_fields=None,
+    feature_names=None,
+    label_field: str = DEFAULT_LABEL_FIELD,
+    label_name: str  = DEFAULT_LABEL_NAME,
     lookback: int = 8,
 ) -> DatasetH:
     """
@@ -110,9 +100,13 @@ def build_dataset(
     The key fix from qlib-update (pytorch_master_ts.py):
       - learn_processors  → used for training data  (DK_L)
       - infer_processors  → used for valid/test data (DK_I)
-    Both processors fit their normalisation statistics on [fit_start, fit_end]
-    (training period) and then apply them consistently.
+    Both fit their normalisation statistics on [fit_start, fit_end].
     """
+    if feature_fields is None:
+        feature_fields = DEFAULT_FEATURE_FIELDS
+    if feature_names is None:
+        feature_names = DEFAULT_FEATURE_NAMES
+
     handler_config = {
         "class": "DataHandlerLP",
         "module_path": "qlib.data.dataset.handler",
@@ -126,28 +120,20 @@ def build_dataset(
                 "class": "QlibDataLoader",
                 "kwargs": {
                     "config": {
-                        "feature": (FEATURE_FIELDS, FEATURE_NAMES),
-                        "label": ([LABEL_FIELD], [LABEL_NAME]),
+                        "feature": (feature_fields, feature_names),
+                        "label":   ([label_field],   [label_name]),
                     },
                     "freq": "day",
                 },
             },
-            # learn_processors: applied when data_key=DK_L (training)
             "learn_processors": [
-                {
-                    "class": "RobustZScoreNorm",
-                    "kwargs": {"fields_group": "feature", "clip_outlier": True},
-                },
+                {"class": "RobustZScoreNorm",
+                 "kwargs": {"fields_group": "feature", "clip_outlier": True}},
                 {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
             ],
-            # infer_processors: applied when data_key=DK_I (valid / test)
-            # Uses statistics fitted on the training period — this is the
-            # bug-fix introduced in qlib-update.
             "infer_processors": [
-                {
-                    "class": "RobustZScoreNorm",
-                    "kwargs": {"fields_group": "feature", "clip_outlier": True},
-                },
+                {"class": "RobustZScoreNorm",
+                 "kwargs": {"fields_group": "feature", "clip_outlier": True}},
                 {"class": "Fillna", "kwargs": {"fields_group": "feature"}},
             ],
         },
@@ -161,141 +147,220 @@ def build_dataset(
             "segments": {
                 "train": (train_start, train_end),
                 "valid": (valid_start, valid_end),
-                "test": (test_start, test_end),
+                "test":  (test_start,  test_end),
             },
             "step_len": lookback,
         },
     }
 
-    dataset = init_instance_by_config(dataset_config)
-    return dataset
+    return init_instance_by_config(dataset_config)
 
 
-def calc_metrics(predictions: pd.DataFrame, dataset: DatasetH) -> dict:
-    """Compute IC, ICIR, RankIC, RankICIR from predictions vs true labels."""
-    dl_test = dataset.prepare("test", col_set=["feature", "label"], data_key=DataHandlerLP.DK_I)
-    label_df = dl_test.data_arr  # raw numpy, last column is label
+def eval_predictions(model: MASTERModel, dataset: DatasetH, segment: str = "valid"):
+    """Run model.predict() and compute daily IC/RankIC metrics."""
+    from torch.utils.data import DataLoader
+    import torch
+    from scipy.stats import spearmanr
 
-    # Rebuild a Series from the test DataHandler
-    handler = dataset.handler
-    label_series = handler.fetch(
-        selector=slice(None), level="datetime", col_set="label", data_key=DataHandlerLP.DK_I
-    ).iloc[:, 0]
+    predictions = model.predict(dataset, segment=segment)
 
-    pred_series = predictions.iloc[:, 0]
-    merged = pd.concat([pred_series.rename("pred"), label_series.rename("label")], axis=1).dropna()
+    dl = dataset.prepare(segment, col_set=["feature", "label"],
+                         data_key=DataHandlerLP.DK_I)
+    sampler = DailyBatchSamplerRandom(dl, shuffle=False)
+    loader  = DataLoader(dl, sampler=sampler, drop_last=False)
 
     ic_list, ric_list = [], []
-    for date, group in merged.groupby(level="datetime"):
-        if len(group) < 5:
+    pred_arr = predictions.values.ravel()
+    pred_idx = 0
+
+    for data in loader:
+        data  = torch.squeeze(data, dim=0)
+        label = data[:, -1, -1].numpy()
+        n     = len(label)
+        pred  = pred_arr[pred_idx:pred_idx + n]
+        pred_idx += n
+
+        mask = ~np.isnan(label)
+        if mask.sum() < 5:
             continue
-        ic = group["pred"].corr(group["label"])
-        ric = group["pred"].corr(group["label"], method="spearman")
+        ic  = np.corrcoef(pred[mask], label[mask])[0, 1]
+        ric, _ = spearmanr(pred[mask], label[mask])
         ic_list.append(ic)
         ric_list.append(ric)
 
     metrics = {
-        "IC": np.nanmean(ic_list),
-        "ICIR": np.nanmean(ic_list) / np.nanstd(ic_list),
-        "RIC": np.nanmean(ric_list),
+        "IC":    np.nanmean(ic_list),
+        "ICIR":  np.nanmean(ic_list) / np.nanstd(ic_list),
+        "RIC":   np.nanmean(ric_list),
         "RICIR": np.nanmean(ric_list) / np.nanstd(ric_list),
     }
-    return metrics
+    return predictions, metrics
 
 
 def main():
     parser = argparse.ArgumentParser(description="MASTER model with local qlib data")
-    parser.add_argument("--mode", choices=["train", "predict", "both"], default="both",
-                        help="Run mode: train only, predict only (requires saved model), or both")
-    parser.add_argument("--data_path", type=str, default="~/Desktop/my_qlib_data",
-                        help="Path to your qlib data folder")
-    parser.add_argument("--instrument", type=str, default="csi300",
-                        help="Instrument universe, e.g. csi300, csi500, csi800, all")
-    parser.add_argument("--data_start", type=str, default="2010-01-01",
-                        help="Earliest date to load from qlib data")
-    parser.add_argument("--data_end", type=str, default="2023-12-31",
-                        help="Latest date to load from qlib data")
-    parser.add_argument("--train_start", type=str, default="2010-01-01")
-    parser.add_argument("--train_end", type=str, default="2019-12-31")
-    parser.add_argument("--valid_start", type=str, default="2020-01-01")
-    parser.add_argument("--valid_end", type=str, default="2020-12-31")
-    parser.add_argument("--test_start", type=str, default="2021-01-01")
-    parser.add_argument("--test_end", type=str, default="2023-12-31")
-    parser.add_argument("--lookback", type=int, default=8,
-                        help="Lookback window T (paper uses 8)")
-    parser.add_argument("--d_model", type=int, default=256)
-    parser.add_argument("--t_nhead", type=int, default=4)
-    parser.add_argument("--s_nhead", type=int, default=2)
-    parser.add_argument("--dropout", type=float, default=0.5)
-    parser.add_argument("--n_epochs", type=int, default=40)
-    parser.add_argument("--lr", type=float, default=8e-6)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--train_stop_loss", type=float, default=None,
-                        help="Stop training early when train_loss <= this threshold")
-    parser.add_argument("--save_path", type=str, default="model/",
-                        help="Directory for saving model checkpoints")
-    parser.add_argument("--save_prefix", type=str, default="",
-                        help="Prefix for checkpoint filenames")
-    parser.add_argument("--model_path", type=str, default=None,
-                        help="Path to a pre-trained model .pkl file (for predict mode)")
-    parser.add_argument("--output_csv", type=str, default="predictions.csv",
-                        help="Where to save prediction output")
-    parser.add_argument("--GPU", type=int, default=0,
-                        help="GPU device index (ignored if no CUDA available)")
+
+    # YAML config (highest-level config source)
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to a YAML workflow config (e.g. workflow_config_master.yaml). "
+                             "CLI args below will override individual values in the YAML.")
+
+    # Run mode
+    parser.add_argument("--mode", choices=["train", "predict", "both"], default="both")
+
+    # Qlib init
+    parser.add_argument("--data_path", type=str, default=None,
+                        help="Path to your qlib data folder (default: from YAML or ~/Desktop/my_qlib_data)")
+
+    # Data / instrument
+    parser.add_argument("--instrument",   type=str,  default=None)
+    parser.add_argument("--data_start",   type=str,  default=None)
+    parser.add_argument("--data_end",     type=str,  default=None)
+    parser.add_argument("--train_start",  type=str,  default=None)
+    parser.add_argument("--train_end",    type=str,  default=None)
+    parser.add_argument("--valid_start",  type=str,  default=None)
+    parser.add_argument("--valid_end",    type=str,  default=None)
+    parser.add_argument("--test_start",   type=str,  default=None)
+    parser.add_argument("--test_end",     type=str,  default=None)
+    parser.add_argument("--lookback",     type=int,  default=None,
+                        help="Lookback window T (paper default: 8)")
+
+    # Model hyper-parameters
+    parser.add_argument("--d_model",      type=int,   default=None)
+    parser.add_argument("--t_nhead",      type=int,   default=None)
+    parser.add_argument("--s_nhead",      type=int,   default=None)
+    parser.add_argument("--dropout",      type=float, default=None)
+    parser.add_argument("--n_epochs",     type=int,   default=None)
+    parser.add_argument("--lr",           type=float, default=None)
+    parser.add_argument("--seed",         type=int,   default=None)
+    parser.add_argument("--train_stop_loss", type=float, default=None)
+    parser.add_argument("--save_path",    type=str,   default=None)
+    parser.add_argument("--save_prefix",  type=str,   default=None)
+    parser.add_argument("--GPU",          type=int,   default=None)
+
+    # Predict-only
+    parser.add_argument("--model_path",  type=str, default=None,
+                        help="Pre-trained model .pkl (predict mode only)")
+    parser.add_argument("--output_csv",  type=str, default="predictions.csv")
+
     args = parser.parse_args()
+
+    # ------------------------------------------------------------------
+    # Merge: YAML defaults → CLI overrides
+    # ------------------------------------------------------------------
+    yaml_cfg = {}
+    if args.config:
+        yaml_cfg = load_yaml_config(args.config)
+
+    def _get(cli_val, yaml_keys, fallback):
+        """Return cli_val if set, else walk yaml_keys path, else fallback."""
+        if cli_val is not None:
+            return cli_val
+        node = yaml_cfg
+        for k in yaml_keys:
+            if not isinstance(node, dict) or k not in node:
+                return fallback
+            node = node[k]
+        return node if node is not None else fallback
+
+    # qlib init
+    data_path  = _get(args.data_path,  ["qlib_init", "provider_uri"], "~/Desktop/my_qlib_data")
+    instrument = _get(args.instrument, ["market"],                     "csi300")
+
+    # dates from data_handler_config
+    dh = yaml_cfg.get("data_handler_config", {})
+    data_start  = _get(args.data_start,  ["data_handler_config", "start_time"],      "2010-01-01")
+    data_end    = _get(args.data_end,    ["data_handler_config", "end_time"],         "2023-12-31")
+    fit_start   = _get(None,             ["data_handler_config", "fit_start_time"],   "2010-01-01")
+    fit_end     = _get(None,             ["data_handler_config", "fit_end_time"],     "2019-12-31")
+
+    # segment dates from task.dataset.kwargs.segments
+    seg = yaml_cfg.get("task", {}).get("dataset", {}).get("kwargs", {}).get("segments", {})
+    train_start = _get(args.train_start, [], None) or (seg.get("train") or ["2010-01-01"])[0]
+    train_end   = _get(args.train_end,   [], None) or (seg.get("train") or [None, "2019-12-31"])[1]
+    valid_start = _get(args.valid_start, [], None) or (seg.get("valid") or ["2020-01-01"])[0]
+    valid_end   = _get(args.valid_end,   [], None) or (seg.get("valid") or [None, "2020-12-31"])[1]
+    test_start  = _get(args.test_start,  [], None) or (seg.get("test")  or ["2021-01-01"])[0]
+    test_end    = _get(args.test_end,    [], None) or (seg.get("test")  or [None, "2023-12-31"])[1]
+    lookback    = _get(args.lookback,    ["task", "dataset", "kwargs", "step_len"], 8)
+
+    # model kwargs
+    mk = yaml_cfg.get("task", {}).get("model", {}).get("kwargs", {})
+    d_feat       = mk.get("d_feat",       10)
+    d_model      = _get(args.d_model,     ["task", "model", "kwargs", "d_model"],      256)
+    t_nhead      = _get(args.t_nhead,     ["task", "model", "kwargs", "t_nhead"],      4)
+    s_nhead      = _get(args.s_nhead,     ["task", "model", "kwargs", "s_nhead"],      2)
+    dropout_t    = _get(args.dropout,     ["task", "model", "kwargs", "T_dropout_rate"], 0.5)
+    dropout_s    = _get(args.dropout,     ["task", "model", "kwargs", "S_dropout_rate"], 0.5)
+    n_epochs     = _get(args.n_epochs,    ["task", "model", "kwargs", "n_epochs"],     40)
+    lr           = _get(args.lr,          ["task", "model", "kwargs", "lr"],           8e-6)
+    seed         = _get(args.seed,        ["task", "model", "kwargs", "seed"],         0)
+    stop_loss    = _get(args.train_stop_loss, ["task", "model", "kwargs", "train_stop_loss_thred"], None)
+    save_path    = _get(args.save_path,   ["task", "model", "kwargs", "save_path"],    "model/")
+    save_prefix  = _get(args.save_prefix, ["task", "model", "kwargs", "save_prefix"],  "")
+    GPU          = _get(args.GPU,         ["task", "model", "kwargs", "GPU"],           0)
+    gate_start   = mk.get("gate_input_start_index", d_feat)
+    gate_end     = mk.get("gate_input_end_index",   d_feat)
+
+    # features from YAML data_loader config (falls back to defaults)
+    data_loader_cfg = yaml_cfg.get("data_handler_config", {}).get("data_loader", {})
+    feature_fields, feature_names = extract_feature_lists(data_loader_cfg)
+    d_feat = len(feature_fields)      # recompute from actual feature list
 
     # ------------------------------------------------------------------
     # 1. Initialise qlib
     # ------------------------------------------------------------------
-    data_path = os.path.expanduser(args.data_path)
-    print(f"Initialising qlib with data path: {data_path}")
+    data_path = os.path.expanduser(str(data_path))
+    print(f"Initialising qlib  data_path={data_path}")
     qlib.init(provider_uri=data_path, region=REG_CN)
 
     # ------------------------------------------------------------------
     # 2. Build the dataset (DatasetH)
     # ------------------------------------------------------------------
-    print(f"Building dataset for instrument={args.instrument}, "
-          f"train={args.train_start}~{args.train_end}, "
-          f"valid={args.valid_start}~{args.valid_end}, "
-          f"test={args.test_start}~{args.test_end}, "
-          f"lookback={args.lookback}")
+    print(f"Building dataset   instrument={instrument}  "
+          f"train={train_start}~{train_end}  "
+          f"valid={valid_start}~{valid_end}  "
+          f"test={test_start}~{test_end}  "
+          f"lookback={lookback}")
     dataset = build_dataset(
-        instruments=args.instrument,
-        data_start=args.data_start,
-        data_end=args.data_end,
-        fit_start=args.train_start,
-        fit_end=args.train_end,
-        train_start=args.train_start,
-        train_end=args.train_end,
-        valid_start=args.valid_start,
-        valid_end=args.valid_end,
-        test_start=args.test_start,
-        test_end=args.test_end,
-        lookback=args.lookback,
+        instruments=instrument,
+        data_start=str(data_start),
+        data_end=str(data_end),
+        fit_start=str(fit_start),
+        fit_end=str(fit_end),
+        train_start=str(train_start),
+        train_end=str(train_end),
+        valid_start=str(valid_start),
+        valid_end=str(valid_end),
+        test_start=str(test_start),
+        test_end=str(test_end),
+        feature_fields=feature_fields,
+        feature_names=feature_names,
+        lookback=int(lookback),
     )
 
     # ------------------------------------------------------------------
     # 3. Build the MASTER model
-    #    gate_input_start_index == gate_input_end_index == D_FEAT (10)
-    #    → market gate is disabled; the model runs in no-gate mode
     # ------------------------------------------------------------------
+    print(f"Building model     d_feat={d_feat}  d_model={d_model}  "
+          f"gate={'enabled' if gate_end > gate_start else 'disabled (no market features)'}")
     model = MASTERModel(
-        d_feat=D_FEAT,
-        d_model=args.d_model,
-        t_nhead=args.t_nhead,
-        s_nhead=args.s_nhead,
-        gate_input_start_index=D_FEAT,   # no market features → gate disabled
-        gate_input_end_index=D_FEAT,
-        T_dropout_rate=args.dropout,
-        S_dropout_rate=args.dropout,
+        d_feat=d_feat,
+        d_model=int(d_model),
+        t_nhead=int(t_nhead),
+        s_nhead=int(s_nhead),
+        gate_input_start_index=int(gate_start),
+        gate_input_end_index=int(gate_end),
+        T_dropout_rate=float(dropout_t),
+        S_dropout_rate=float(dropout_s),
         beta=None,
-        n_epochs=args.n_epochs,
-        lr=args.lr,
-        GPU=args.GPU,
-        seed=args.seed,
-        train_stop_loss_thred=args.train_stop_loss,
-        save_path=args.save_path,
-        save_prefix=args.save_prefix,
+        n_epochs=int(n_epochs),
+        lr=float(lr),
+        GPU=int(GPU),
+        seed=int(seed),
+        train_stop_loss_thred=float(stop_loss) if stop_loss is not None else None,
+        save_path=str(save_path),
+        save_prefix=str(save_prefix),
     )
 
     # ------------------------------------------------------------------
@@ -306,68 +371,35 @@ def main():
         model.fit(dataset)
 
     # ------------------------------------------------------------------
-    # 5. Load pre-trained weights (for predict-only mode)
+    # 5. Load pre-trained weights (predict-only mode)
     # ------------------------------------------------------------------
     if args.mode == "predict":
-        if args.model_path is None:
-            # Try the default checkpoint path
-            default_ckpt = f"{args.save_path}/{args.save_prefix}master_{args.seed}.pkl"
-            if os.path.exists(default_ckpt):
-                args.model_path = default_ckpt
-            else:
-                raise FileNotFoundError(
-                    f"No model checkpoint found at {default_ckpt}. "
-                    "Please train first (--mode train) or provide --model_path."
-                )
-        print(f"Loading model from {args.model_path}")
-        model.load_model(args.model_path)
+        ckpt = args.model_path
+        if ckpt is None:
+            ckpt = f"{save_path}/{save_prefix}master_{seed}.pkl"
+        ckpt = os.path.expanduser(ckpt)
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(
+                f"No checkpoint at {ckpt}. Train first (--mode train) or provide --model_path."
+            )
+        print(f"Loading model from {ckpt}")
+        model.load_model(ckpt)
 
     # ------------------------------------------------------------------
-    # 6. Predict on test set
+    # 6. Evaluate on validation + test sets
     # ------------------------------------------------------------------
     if args.mode in ("predict", "both"):
-        print("\n=== Predicting on test set ===")
-        predictions = model.predict(dataset, segment="test")
+        print("\n=== Validation set metrics ===")
+        _, val_metrics = eval_predictions(model, dataset, segment="valid")
+        print(f"  IC   : {val_metrics['IC']:.4f}    ICIR  : {val_metrics['ICIR']:.4f}")
+        print(f"  RankIC: {val_metrics['RIC']:.4f}   RankICIR: {val_metrics['RICIR']:.4f}")
+
+        print("\n=== Test set predictions ===")
+        predictions, test_metrics = eval_predictions(model, dataset, segment="test")
         predictions.to_csv(args.output_csv)
-        print(f"Predictions saved to {args.output_csv}")
-        print(predictions.head(10))
-
-        # Compute IC metrics using validation set for a quick sanity check
-        print("\n=== Predicting on validation set ===")
-        val_predictions = model.predict(dataset, segment="valid")
-
-        # Quick daily IC from predictions vs labels
-        dl_valid = dataset.prepare("valid", col_set=["feature", "label"],
-                                   data_key=DataHandlerLP.DK_I)
-        import torch
-        from master_model import DailyBatchSamplerRandom
-        from torch.utils.data import DataLoader
-
-        sampler = DailyBatchSamplerRandom(dl_valid, shuffle=False)
-        valid_loader = DataLoader(dl_valid, sampler=sampler, drop_last=False)
-
-        ic_list, ric_list = [], []
-        pred_idx = 0
-        val_pred_arr = val_predictions.values.ravel()
-
-        for data in valid_loader:
-            data = torch.squeeze(data, dim=0)
-            label = data[:, -1, -1].numpy()
-            n = len(label)
-            pred = val_pred_arr[pred_idx:pred_idx + n]
-            pred_idx += n
-
-            valid_mask = ~np.isnan(label)
-            if valid_mask.sum() < 5:
-                continue
-            from scipy.stats import spearmanr
-            ic = np.corrcoef(pred[valid_mask], label[valid_mask])[0, 1]
-            ric, _ = spearmanr(pred[valid_mask], label[valid_mask])
-            ic_list.append(ic)
-            ric_list.append(ric)
-
-        print(f"Valid IC:    {np.nanmean(ic_list):.4f}  ICIR: {np.nanmean(ic_list)/np.nanstd(ic_list):.4f}")
-        print(f"Valid RankIC:{np.nanmean(ric_list):.4f}  RICIR:{np.nanmean(ric_list)/np.nanstd(ric_list):.4f}")
+        print(f"  IC   : {test_metrics['IC']:.4f}    ICIR  : {test_metrics['ICIR']:.4f}")
+        print(f"  RankIC: {test_metrics['RIC']:.4f}   RankICIR: {test_metrics['RICIR']:.4f}")
+        print(f"\nPredictions saved to {args.output_csv}")
 
 
 if __name__ == "__main__":
