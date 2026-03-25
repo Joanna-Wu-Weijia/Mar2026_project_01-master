@@ -399,6 +399,37 @@ class MASTERModel(Model):
         data_loader = DataLoader(data, sampler=sampler, drop_last=drop_last)
         return data_loader
 
+    def _ic_epoch(self, data_loader):
+        """Compute mean IC, ICIR, RankIC, RankICIR over all trading days in the loader."""
+        from scipy.stats import spearmanr
+        self.model.eval()
+        ic_list, ric_list = [], []
+
+        for data in data_loader:
+            data = torch.squeeze(data, dim=0)
+            feature = data[:, :, 0:-1].to(self.device)
+            label = data[:, -1, -1].numpy()
+
+            with torch.no_grad():
+                pred = self.model(feature.float()).detach().cpu().numpy()
+
+            mask = ~np.isnan(label)
+            if mask.sum() < 5:
+                continue
+            ic = np.corrcoef(pred[mask], label[mask])[0, 1]
+            ric, _ = spearmanr(pred[mask], label[mask])
+            ic_list.append(ic)
+            ric_list.append(ric)
+
+        ic_arr  = np.array(ic_list)
+        ric_arr = np.array(ric_list)
+        return {
+            "IC":     float(np.nanmean(ic_arr)),
+            "ICIR":   float(np.nanmean(ic_arr) / (np.nanstd(ic_arr) + 1e-12)),
+            "RankIC": float(np.nanmean(ric_arr)),
+            "RankICIR": float(np.nanmean(ric_arr) / (np.nanstd(ric_arr) + 1e-12)),
+        }
+
     def fit(self, dataset: DatasetH):
         # Use DK_L (learn processors) for training data
         dl_train = dataset.prepare("train", col_set=["feature", "label"], data_key=DataHandlerLP.DK_L)
@@ -414,8 +445,16 @@ class MASTERModel(Model):
 
         for step in range(self.n_epochs):
             train_loss = self.train_epoch(train_loader)
-            val_loss = self.test_epoch(valid_loader)
-            print("Epoch %d, train_loss %.6f, val_loss %.6f" % (step, train_loss, val_loss))
+            val_loss   = self.test_epoch(valid_loader)
+            ic_metrics = self._ic_epoch(valid_loader)
+            print(
+                "Epoch %d, train_loss %.6f, val_loss %.6f | "
+                "IC %.4f, ICIR %.4f, RankIC %.4f, RankICIR %.4f" % (
+                    step, train_loss, val_loss,
+                    ic_metrics["IC"], ic_metrics["ICIR"],
+                    ic_metrics["RankIC"], ic_metrics["RankICIR"],
+                )
+            )
 
             if best_val_loss > val_loss:
                 best_param = copy.deepcopy(self.model.state_dict())
