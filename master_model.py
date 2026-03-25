@@ -48,6 +48,13 @@ def _qlib_sample_index(data_source):
     return gi() if callable(gi) else data_source.index
 
 
+def _sanitize_features(x: torch.Tensor) -> torch.Tensor:
+    """NaN/Inf in inputs otherwise propagate through attention and yield NaN losses."""
+    if not torch.is_floating_point(x):
+        x = x.float()
+    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def drop_na(x):
     mask = ~torch.isnan(x)
     return mask, x[mask]
@@ -283,7 +290,7 @@ class MASTERModel(Model):
                  S_dropout_rate: float = 0.5,
                  beta: float = None,
                  n_epochs: int = 40,
-                 lr: float = 8e-6,
+                 lr: float = 1e-6,
                  GPU: int = 0,
                  seed: int = 0,
                  train_stop_loss_thred: float = None,
@@ -331,9 +338,10 @@ class MASTERModel(Model):
         self.fitted = True
 
     def loss_fn(self, pred, label):
-        mask = ~torch.isnan(label)
-        loss = (pred[mask] - label[mask]) ** 2
-        return torch.mean(loss)
+        mask = torch.isfinite(pred) & torch.isfinite(label)
+        if mask.sum() == 0:
+            return torch.tensor(float("nan"), device=pred.device, dtype=pred.dtype)
+        return ((pred[mask] - label[mask]) ** 2).mean()
 
     def train_epoch(self, data_loader):
         self.model.train()
@@ -348,7 +356,7 @@ class MASTERModel(Model):
             T - lookback window length (default 8)
             F - feature count (default 10), last column is label
             '''
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = _sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].to(self.device)
 
             mask, label = drop_extreme(label)
@@ -359,8 +367,10 @@ class MASTERModel(Model):
             if not torch.all(torch.isfinite(label)):
                 continue
 
-            pred = self.model(feature.float())
+            pred = self.model(feature)
             loss = self.loss_fn(pred, label)
+            if not torch.isfinite(loss):
+                continue
             losses.append(loss.item())
 
             self.train_optimizer.zero_grad()
@@ -380,18 +390,26 @@ class MASTERModel(Model):
 
         for data in data_loader:
             data = torch.squeeze(data, dim=0)
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = _sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].to(self.device)
 
             # Use all stocks for inter-stock spatial attention;
             # only drop NaN labels to compute the loss metric.
             mask, label = drop_na(label)
+            if label.numel() < 2:
+                continue
             label = zscore(label)
+            if not torch.all(torch.isfinite(label)):
+                continue
 
-            pred = self.model(feature.float())
+            pred = self.model(feature)
             loss = self.loss_fn(pred[mask], label)
+            if not torch.isfinite(loss):
+                continue
             losses.append(loss.item())
 
+        if not losses:
+            return float("nan")
         return float(np.mean(losses))
 
     def _init_data_loader(self, data, shuffle=True, drop_last=True):
@@ -426,6 +444,8 @@ class MASTERModel(Model):
 
         import os
         os.makedirs(self.save_path, exist_ok=True)
+        if best_param is None:
+            best_param = self.model.state_dict()
         torch.save(best_param, f'{self.save_path}/{self.save_prefix}master_{self.seed}.pkl')
         print(f"Best model saved to {self.save_path}/{self.save_prefix}master_{self.seed}.pkl")
 
@@ -441,9 +461,9 @@ class MASTERModel(Model):
         self.model.eval()
         for data in test_loader:
             data = torch.squeeze(data, dim=0)
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = _sanitize_features(data[:, :, 0:-1].to(self.device))
             with torch.no_grad():
-                pred = self.model(feature.float()).detach().cpu().numpy()
+                pred = self.model(feature).detach().cpu().numpy()
             pred_all.append(pred.ravel())
 
         pred_all = pd.DataFrame(np.concatenate(pred_all), index=_qlib_sample_index(dl_test))

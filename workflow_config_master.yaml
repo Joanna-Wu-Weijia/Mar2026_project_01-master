@@ -89,7 +89,7 @@ task:
         kwargs:
             seed: 0
             n_epochs: 40
-            lr: 0.00001
+            lr: 0.000001
             train_stop_loss_thred: 0.95
             d_feat: 10
             d_model: 256

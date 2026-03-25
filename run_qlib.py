@@ -297,7 +297,7 @@ def main():
     dropout_t    = _get(args.dropout,     ["task", "model", "kwargs", "T_dropout_rate"], 0.5)
     dropout_s    = _get(args.dropout,     ["task", "model", "kwargs", "S_dropout_rate"], 0.5)
     n_epochs     = _get(args.n_epochs,    ["task", "model", "kwargs", "n_epochs"],     40)
-    lr           = _get(args.lr,          ["task", "model", "kwargs", "lr"],           8e-6)
+    lr           = _get(args.lr,          ["task", "model", "kwargs", "lr"],           1e-6)
     seed         = _get(args.seed,        ["task", "model", "kwargs", "seed"],         0)
     stop_loss    = _get(args.train_stop_loss, ["task", "model", "kwargs", "train_stop_loss_thred"], None)
     save_path    = _get(args.save_path,   ["task", "model", "kwargs", "save_path"],    "model/")
