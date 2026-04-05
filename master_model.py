@@ -1,58 +1,29 @@
-# Adapted from SJTU-DMTai/MASTER qlib-update/pytorch_master_ts.py
-
-
 import numpy as np
 import pandas as pd
 import copy
 import math
 
 import torch
-from torch.utils.data import DataLoader, Sampler
+from torch.utils.data import DataLoader
 from torch import nn
 from torch.nn.modules.linear import Linear
 from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.normalization import LayerNorm
 import torch.optim as optim
 
-# Absolute qlib imports (works as a standalone script)
 from qlib.data.dataset import DatasetH
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.model.base import Model
 
-
-def zscore(x):
-    # unbiased std can be 0 or unstable on small batches; eps avoids NaN in CSZscoreNorm
-    return (x - x.mean()) / (x.std(unbiased=False) + 1e-8)
-
-
-def drop_extreme(x):
-    sorted_tensor, indices = x.sort()
-    N = x.shape[0]
-    percent_2_5 = int(0.025 * N)
-    # Exclude top 2.5% and bottom 2.5% values.
-    # Must use [k : N-k], not [k:-k]: when k==0, x[0:-0] is an empty slice in Python.
-    filtered_indices = indices[percent_2_5 : N - percent_2_5]
-    mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
-    mask[filtered_indices] = True
-    return mask, x[mask]
-
-
-def _qlib_sample_index(data_source):
-    """TSDataSampler.get_index() or plain tabular index (datetime, instrument)."""
-    gi = getattr(data_source, "get_index", None)
-    return gi() if callable(gi) else data_source.index
-
-
-def _sanitize_features(x: torch.Tensor) -> torch.Tensor:
-    """NaN/Inf in inputs otherwise propagate through attention and yield NaN losses."""
-    if not torch.is_floating_point(x):
-        x = x.float()
-    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
-
-
-def drop_na(x):
-    mask = ~torch.isnan(x)
-    return mask, x[mask]
+from base_model import (
+    DailyBatchSamplerRandom,
+    drop_extreme,
+    drop_na,
+    mse_loss_finite,
+    qlib_sample_index,
+    sanitize_features,
+    zscore,
+)
 
 
 class PositionalEncoding(nn.Module):
@@ -251,28 +222,6 @@ class MASTER(nn.Module):
         return output
 
 
-class DailyBatchSamplerRandom(Sampler):
-    def __init__(self, data_source, shuffle=False):
-        self.data_source = data_source
-        self.shuffle = shuffle
-        self.daily_count = pd.Series(index=_qlib_sample_index(self.data_source)).groupby("datetime").size().values
-        self.daily_index = np.roll(np.cumsum(self.daily_count), 1)
-        self.daily_index[0] = 0
-
-    def __iter__(self):
-        if self.shuffle:
-            index = np.arange(len(self.daily_count))
-            np.random.shuffle(index)
-            for i in index:
-                yield np.arange(self.daily_index[i], self.daily_index[i] + self.daily_count[i])
-        else:
-            for idx, count in zip(self.daily_index, self.daily_count):
-                yield np.arange(idx, idx + count)
-
-    def __len__(self):
-        return len(self.data_source)
-
-
 class MASTERModel(Model):
     def __init__(self,
                  d_feat: int = 10,
@@ -333,10 +282,7 @@ class MASTERModel(Model):
         self.fitted = True
 
     def loss_fn(self, pred, label):
-        mask = torch.isfinite(pred) & torch.isfinite(label)
-        if mask.sum() == 0:
-            return torch.tensor(float("nan"), device=pred.device, dtype=pred.dtype)
-        return ((pred[mask] - label[mask]) ** 2).mean()
+        return mse_loss_finite(pred, label)
 
     def train_epoch(self, data_loader):
         self.model.train()
@@ -351,7 +297,7 @@ class MASTERModel(Model):
             T - lookback window length (default 8)
             F - feature count (default 10), last column is label
             '''
-            feature = _sanitize_features(data[:, :, 0:-1].to(self.device))
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].to(self.device)
 
             mask, label = drop_extreme(label)
@@ -385,7 +331,7 @@ class MASTERModel(Model):
 
         for data in data_loader:
             data = torch.squeeze(data, dim=0)
-            feature = _sanitize_features(data[:, :, 0:-1].to(self.device))
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].to(self.device)
 
             # Use all stocks for inter-stock spatial attention;
@@ -420,11 +366,11 @@ class MASTERModel(Model):
 
         for data in data_loader:
             data = torch.squeeze(data, dim=0)
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].numpy()
 
             with torch.no_grad():
-                pred = self.model(feature.float()).detach().cpu().numpy()
+                pred = self.model(feature).detach().cpu().numpy()
 
             mask = ~np.isnan(label)
             if mask.sum() < 5:
@@ -469,7 +415,7 @@ class MASTERModel(Model):
                 )
             )
 
-            if best_val_loss > val_loss:
+            if math.isfinite(val_loss) and best_val_loss > val_loss:
                 best_param = copy.deepcopy(self.model.state_dict())
                 best_val_loss = val_loss
 
@@ -495,10 +441,10 @@ class MASTERModel(Model):
         self.model.eval()
         for data in test_loader:
             data = torch.squeeze(data, dim=0)
-            feature = _sanitize_features(data[:, :, 0:-1].to(self.device))
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             with torch.no_grad():
                 pred = self.model(feature).detach().cpu().numpy()
             pred_all.append(pred.ravel())
 
-        pred_all = pd.DataFrame(np.concatenate(pred_all), index=_qlib_sample_index(dl_test))
+        pred_all = pd.DataFrame(np.concatenate(pred_all), index=qlib_sample_index(dl_test))
         return pred_all

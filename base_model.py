@@ -9,21 +9,23 @@ import torch.optim as optim
 
 
 def calc_ic(pred, label):
-    df = pd.DataFrame({'pred': pred, 'label': label})
-    ic = df['pred'].corr(df['label'])
-    ric = df['pred'].corr(df['label'], method='spearman')
+    df = pd.DataFrame({"pred": pred, "label": label})
+    ic = df["pred"].corr(df["label"])
+    ric = df["pred"].corr(df["label"], method="spearman")
     return ic, ric
 
 
 def zscore(x):
+    """Cross-sectional z-score (population std + eps for stability)."""
     return (x - x.mean()) / (x.std(unbiased=False) + 1e-8)
 
 
 def drop_extreme(x):
+    """Drop top/bottom 2.5% of label values by rank (training regularization)."""
     sorted_tensor, indices = x.sort()
     N = x.shape[0]
     percent_2_5 = int(0.025 * N)
-    # Use [k : N-k] — when k==0, indices[0:-0] is an empty slice.
+    # Use [k : N-k] — when k==0, indices[0:-0] is an empty slice in Python.
     filtered_indices = indices[percent_2_5 : N - percent_2_5]
     mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
     mask[filtered_indices] = True
@@ -31,22 +33,41 @@ def drop_extreme(x):
 
 
 def drop_na(x):
-    mask = ~x.isnan()
+    mask = ~torch.isnan(x)
     return mask, x[mask]
 
 
-def _qlib_sample_index(data_source):
+def qlib_sample_index(data_source):
+    """Index for aligning predictions: TSDataSampler.get_index() or DataFrame.index."""
     gi = getattr(data_source, "get_index", None)
     return gi() if callable(gi) else data_source.index
 
 
+def sanitize_features(x: torch.Tensor) -> torch.Tensor:
+    """Replace non-finite feature values so models do not propagate NaN through layers."""
+    if not torch.is_floating_point(x):
+        x = x.float()
+    return torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def mse_loss_finite(pred, label):
+    """MSE on entries where both pred and label are finite."""
+    mask = torch.isfinite(pred) & torch.isfinite(label)
+    if mask.sum() == 0:
+        return torch.tensor(float("nan"), device=pred.device, dtype=pred.dtype)
+    return ((pred[mask] - label[mask]) ** 2).mean()
+
+
 class DailyBatchSamplerRandom(Sampler):
+    """One batch = one calendar day (all instruments that day), optional shuffle of days."""
+
     def __init__(self, data_source, shuffle=False):
         self.data_source = data_source
         self.shuffle = shuffle
-        # calculate number of samples in each batch
-        self.daily_count = pd.Series(index=_qlib_sample_index(self.data_source)).groupby("datetime").size().values
-        self.daily_index = np.roll(np.cumsum(self.daily_count), 1)  # calculate begin index of each batch
+        self.daily_count = (
+            pd.Series(index=qlib_sample_index(self.data_source)).groupby("datetime").size().values
+        )
+        self.daily_index = np.roll(np.cumsum(self.daily_count), 1)
         self.daily_index[0] = 0
 
     def __iter__(self):
@@ -64,7 +85,7 @@ class DailyBatchSamplerRandom(Sampler):
 
 
 class SequenceModel:
-    def __init__(self, n_epochs, lr, GPU=None, seed=None, train_stop_loss_thred=None, save_path='model/', save_prefix=''):
+    def __init__(self, n_epochs, lr, GPU=None, seed=None, train_stop_loss_thred=None, save_path="model/", save_prefix=""):
         self.n_epochs = n_epochs
         self.lr = lr
         self.device = torch.device(f"cuda:{GPU}" if torch.cuda.is_available() else "cpu")
@@ -92,9 +113,7 @@ class SequenceModel:
         self.model.to(self.device)
 
     def loss_fn(self, pred, label):
-        mask = ~torch.isnan(label)
-        loss = (pred[mask] - label[mask]) ** 2
-        return torch.mean(loss)
+        return mse_loss_finite(pred, label)
 
     def train_epoch(self, data_loader):
         self.model.train()
@@ -102,25 +121,21 @@ class SequenceModel:
 
         for data in data_loader:
             data = torch.squeeze(data, dim=0)
-            '''
-            data.shape: (N, T, F)
-            N - number of stocks
-            T - length of lookback_window, 8
-            F - features + 1 label
-            '''
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].to(self.device)
 
             mask, label = drop_extreme(label)
             if label.numel() < 2:
                 continue
             feature = feature[mask, :, :]
-            label = zscore(label)  # CSZscoreNorm
+            label = zscore(label)
             if not torch.all(torch.isfinite(label)):
                 continue
 
-            pred = self.model(feature.float())
+            pred = self.model(feature)
             loss = self.loss_fn(pred, label)
+            if not torch.isfinite(loss):
+                continue
             losses.append(loss.item())
 
             self.train_optimizer.zero_grad()
@@ -140,16 +155,24 @@ class SequenceModel:
 
         for data in data_loader:
             data = torch.squeeze(data, dim=0)
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1].to(self.device)
 
             mask, label = drop_na(label)
+            if label.numel() < 2:
+                continue
             label = zscore(label)
+            if not torch.all(torch.isfinite(label)):
+                continue
 
-            pred = self.model(feature.float())
+            pred = self.model(feature)
             loss = self.loss_fn(pred[mask], label)
+            if not torch.isfinite(loss):
+                continue
             losses.append(loss.item())
 
+        if not losses:
+            return float("nan")
         return float(np.mean(losses))
 
     def _init_data_loader(self, data, shuffle=True, drop_last=True):
@@ -159,7 +182,7 @@ class SequenceModel:
 
     def load_param(self, param_path):
         self.model.load_state_dict(torch.load(param_path, map_location=self.device))
-        self.fitted = 'Previously trained.'
+        self.fitted = "Previously trained."
 
     def fit(self, dl_train, dl_valid=None):
         train_loader = self._init_data_loader(dl_train, shuffle=True, drop_last=True)
@@ -169,21 +192,23 @@ class SequenceModel:
             self.fitted = step
             if dl_valid:
                 predictions, metrics = self.predict(dl_valid)
-                print("Epoch %d, train_loss %.6f, valid ic %.4f, icir %.3f, rankic %.4f, rankicir %.3f." % (
-                    step, train_loss, metrics['IC'], metrics['ICIR'], metrics['RIC'], metrics['RICIR']))
+                print(
+                    "Epoch %d, train_loss %.6f, valid ic %.4f, icir %.3f, rankic %.4f, rankicir %.3f."
+                    % (step, train_loss, metrics["IC"], metrics["ICIR"], metrics["RIC"], metrics["RICIR"])
+                )
             else:
                 print("Epoch %d, train_loss %.6f" % (step, train_loss))
 
             if self.train_stop_loss_thred is not None and train_loss <= self.train_stop_loss_thred:
                 best_param = copy.deepcopy(self.model.state_dict())
-                torch.save(best_param, f'{self.save_path}/{self.save_prefix}_{self.seed}.pkl')
+                torch.save(best_param, f"{self.save_path}/{self.save_prefix}_{self.seed}.pkl")
                 break
 
     def predict(self, dl_test):
         if self.fitted == -1:
             raise ValueError("model is not fitted yet!")
         else:
-            print('Epoch:', self.fitted)
+            print("Epoch:", self.fitted)
 
         test_loader = self._init_data_loader(dl_test, shuffle=False, drop_last=False)
 
@@ -194,24 +219,24 @@ class SequenceModel:
         self.model.eval()
         for data in test_loader:
             data = torch.squeeze(data, dim=0)
-            feature = data[:, :, 0:-1].to(self.device)
+            feature = sanitize_features(data[:, :, 0:-1].to(self.device))
             label = data[:, -1, -1]
 
             with torch.no_grad():
-                pred = self.model(feature.float()).detach().cpu().numpy()
+                pred = self.model(feature).detach().cpu().numpy()
             preds.append(pred.ravel())
 
             daily_ic, daily_ric = calc_ic(pred, label.detach().numpy())
             ic.append(daily_ic)
             ric.append(daily_ric)
 
-        predictions = pd.Series(np.concatenate(preds), index=_qlib_sample_index(dl_test))
+        predictions = pd.Series(np.concatenate(preds), index=qlib_sample_index(dl_test))
 
         metrics = {
-            'IC': np.mean(ic),
-            'ICIR': np.mean(ic) / np.std(ic),
-            'RIC': np.mean(ric),
-            'RICIR': np.mean(ric) / np.std(ric)
+            "IC": np.mean(ic),
+            "ICIR": np.mean(ic) / np.std(ic),
+            "RIC": np.mean(ric),
+            "RICIR": np.mean(ric) / np.std(ric),
         }
 
         return predictions, metrics

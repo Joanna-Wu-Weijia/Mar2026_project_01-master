@@ -26,7 +26,7 @@ from qlib.data.dataset import DatasetH, TSDatasetH
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.utils import init_instance_by_config
 
-from master_model import MASTERModel, DailyBatchSamplerRandom
+from master_model import MASTERModel, DailyBatchSamplerRandom  # sampler lives in base_model
 
 
 # ---------------------------------------------------------------------------
