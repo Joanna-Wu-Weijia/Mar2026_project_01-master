@@ -1,4 +1,4 @@
-# MASTER Stock Prediction Model — Local Qlib Data
+# MASTER Stock Prediction Model
 
 This project runs the **MASTER** model (AAAI-2024) on your own local Chinese A-share stock data stored in qlib format.
 
