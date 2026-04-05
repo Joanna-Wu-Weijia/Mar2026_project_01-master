@@ -14,7 +14,6 @@ from torch.nn.modules.dropout import Dropout
 from torch.nn.modules.normalization import LayerNorm
 import torch.optim as optim
 
-# Absolute qlib imports (works as a standalone script)
 from qlib.data.dataset import DatasetH
 from qlib.data.dataset.handler import DataHandlerLP
 from qlib.model.base import Model
