@@ -88,6 +88,10 @@ class MASTERModel(Model):
             np.random.seed(self.seed)
             torch.manual_seed(self.seed)
 
+        # Author sets beta based on market (pytorch_master_ts.py MASTERModel.__init__)
+        if beta is None:
+            self.beta = 10 if market == "csi300" else 5
+
         # Instantiate the MASTER nn.Module from master.py (author's exact code)
         self.model = MASTER(
             d_feat=self.d_feat,
@@ -188,10 +192,9 @@ class MASTERModel(Model):
         import os
         os.makedirs(self.save_path, exist_ok=True)
 
-        # DK_L (learn processors) for training — e.g. DropnaLabel + CSRankNorm
         dl_train = dataset.prepare("train", col_set=["feature", "label"], data_key=DataHandlerLP.DK_L)
-        # DK_I (infer processors) for validation — normalisation fitted on training only
-        dl_valid = dataset.prepare("valid", col_set=["feature", "label"], data_key=DataHandlerLP.DK_I)
+        # Author uses DK_L for validation too (same learn processors: DropnaLabel + CSRankNorm)
+        dl_valid = dataset.prepare("valid", col_set=["feature", "label"], data_key=DataHandlerLP.DK_L)
 
         train_loader = self._init_data_loader(dl_train, shuffle=True, drop_last=True)
         valid_loader = self._init_data_loader(dl_valid, shuffle=False, drop_last=False)
