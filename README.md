@@ -1,26 +1,23 @@
-# MASTER Stock Prediction Model — qlib Workflow
+# MASTER Stock Prediction Model
 
-This project runs the **MASTER** model (AAAI-2024) on local Chinese A-share stock data stored in qlib format, using the official qlib workflow for training, signal evaluation, and portfolio backtesting.
+This project runs the **MASTER** model (AAAI-2024) on your own local Chinese A-share stock data stored in qlib format.
 
-> **What is MASTER?**  
-> MASTER (Market-Guided Stock Transformer) is a deep learning model for stock return prediction published at AAAI 2024. It uses temporal self-attention (within each stock across days) and spatial self-attention (across stocks within each day) to jointly model cross-sectional stock dynamics.  
+> **What is MASTER?**
+> MASTER (Market-Guided Stock Transformer) is a deep learning model for stock return prediction published at AAAI 2024. It uses temporal self-attention (across days) and spatial self-attention (across stocks) to jointly model how stocks move together over time.
 > Original paper and code: [SJTU-DMTai/MASTER](https://github.com/SJTU-DMTai/MASTER)
 
-> **What is qlib?**  
-> [Qlib](https://github.com/microsoft/qlib) is Microsoft's open-source quantitative investment platform. It standardises stock data storage (binary `.bin` files), provides feature engineering pipelines (Alpha158), and offers a full experiment workflow including signal evaluation and portfolio backtesting.
+> **What is qlib?**
+> [Qlib](https://github.com/microsoft/qlib) is Microsoft's open-source quantitative investment platform. It standardises how stock data is stored (binary `.bin` files) and provides tools for data loading, feature engineering, and model training.
 
 ---
 
-## How this project works
+## What this project does
 
-1. Loads local qlib stock data (OHLCV binary files at `~/Desktop/my_qlib_data`)
-2. Computes **Alpha158** — 158 standard financial factors — via qlib's built-in handler
-3. Trains the MASTER model 3 times (seeds 0, 1, 2) to predict each stock's 5-day forward return
-4. For each seed, runs the full qlib workflow:
-   - **SignalRecord** — generates predictions for the test period and saves them
-   - **SigAnaRecord** — computes IC, ICIR, Rank IC, Rank ICIR
-   - **PortAnaRecord** — runs a daily portfolio backtest (Top-30 stocks, daily rebalance)
-5. Prints mean ± std of all metrics across the 3 seeds
+1. Loads your local qlib stock data (OHLCV binary files)
+2. Computes 10 financial features from the raw price/volume fields
+3. Trains the MASTER model to predict each stock's next-day return
+4. Reports IC, ICIR, RankIC, RankICIR on the validation set each epoch
+5. Saves a model checkpoint and a CSV of predictions on the test set
 
 ---
 
@@ -28,14 +25,11 @@ This project runs the **MASTER** model (AAAI-2024) on local Chinese A-share stoc
 
 | File | Role |
 |------|------|
-| `master.py` | **Author's exact standalone code** — MASTER neural network (`MASTER` nn.Module) and standalone `MASTERModel(SequenceModel)`. Not modified. Source: [SJTU-DMTai/MASTER](https://github.com/SJTU-DMTai/MASTER) |
-| `base_model.py` | **Author's exact standalone code** — `SequenceModel` base class (standalone training loop), `DailyBatchSamplerRandom`, and utility functions (`zscore`, `drop_extreme`, `calc_ic`, …). Not modified. Source: [SJTU-DMTai/MASTER](https://github.com/SJTU-DMTai/MASTER) |
-| `master_model.py` | **Integration bridge** — imports `MASTER` from `master.py`, wraps it in a qlib-compatible `MASTERModel(qlib.Model)` with `fit(dataset)`, `predict(dataset)`, `load_model(path)`. This is the glue between the two author repos. |
-| `main.py` | **Entry point** — qlib workflow: initialises qlib, builds the Alpha158 dataset, trains 3 seeds, runs `SignalRecord → SigAnaRecord → PortAnaRecord`. Based on [SJTU-DMTai/qlib examples/benchmarks/MASTER](https://github.com/SJTU-DMTai/qlib/tree/fbd067c0f0a58a9ba0399c5334d588f7f30c9b10/examples/benchmarks/MASTER). |
-| `workflow_config_master_Alpha158.yaml` | **Primary config** — qlib-style YAML with Alpha158 features, our local data path, date ranges, model hyperparameters, and portfolio backtest settings. |
-| `workflow_config_master.yaml` | Legacy config using 10 custom OHLCV features. Kept for reference; not used by `main.py`. |
-| `base_model.py` | Author's standalone utilities (unchanged). |
-| `requirements.txt` | Python package dependencies. |
+| `workflow_config_master.yaml` | **Edit this first** — all settings: data path, date ranges, instrument universe, model hyperparameters |
+| `main.py` | **Run this** — loads YAML, trains MASTER, runs qlib signal analysis + backtest |
+| `master_model.py` | MASTER neural network definition and training logic |
+| `base_model.py` | Shared training utilities (loss, sampler, metrics) |
+| `requirements.txt` | Python package dependencies |
 
 ---
 
@@ -53,14 +47,14 @@ pip install -r requirements.txt
 
 ## Data folder structure
 
-Your qlib data folder (default: `~/Desktop/my_qlib_data`) must follow this layout:
+Your qlib data folder must look like this:
 
 ```
 my_qlib_data/
 ├── calendars/
 │   └── day.txt              # one trading date per line, e.g.: 2020-01-02
 ├── features/
-│   └── sh600000/            # one sub-folder per stock
+│   └── sh600000/            # one sub-folder per stock (e.g. sh600000, sz000001, bj430090)
 │       ├── close.day.bin
 │       ├── open.day.bin
 │       ├── high.day.bin
@@ -68,210 +62,156 @@ my_qlib_data/
 │       ├── volume.day.bin
 │       ├── amount.day.bin
 │       ├── vwap.day.bin
-│       └── ...
+│       ├── change.day.bin
+│       ├── factor.day.bin
+│       └── adjclose.day.bin
 └── instruments/
-    ├── csi300.txt           # CSI 300 constituent list (with date ranges)
+    ├── all.txt
+    ├── csi300.txt           # which stocks are in CSI 300 and when
     ├── csi500.txt
+    ├── csi800.txt
     └── ...
 ```
 
-**Instruments file format** — tab-separated, no header:
+**Instruments file format** — tab-separated, no header, one stock per line:
 ```
-SH600000    2010-01-04    2026-03-20
-SZ000001    2010-01-04    2026-03-20
+SH600000    2020-01-02    2026-03-20
+SZ000001    2020-01-02    2026-03-20
+BJ430090    2021-11-15    2026-03-20
 ```
-
-**Alpha158 requirements**: the handler needs `$close`, `$open`, `$high`, `$low`, `$volume`, `$amount`, `$vwap` fields. Any standard qlib A-share dataset provides these.
+The symbol prefix (`SH` / `SZ` / `BJ`) must match the folder name case in `features/`.
 
 ---
 
 ## Quick start
 
-**Step 1 — Check the config**
+**Step 1 — Edit the config file**
 
-Open `workflow_config_master_Alpha158.yaml` and verify:
-- `provider_uri`: path to your qlib data folder (default `~/Desktop/my_qlib_data`)
-- `segments`: train / valid / test date splits
+Open `workflow_config_master.yaml` and set:
+- `provider_uri`: path to your qlib data folder
+- `start_time` / `end_time`: full date range of your data
+- `segments`: train / valid / test split dates
+- `market`: instrument universe (e.g. `csi300`, `csi500`, `all`)
 
-**Step 2 — Run**
+**Step 2 — Run** (from the project directory)
 
 ```bash
-# Train 3 seeds and run full backtest
-python main.py
+python main.py --config workflow_config_master.yaml
+```
 
-# Or specify a different config
+Alpha158 示例（默认配置名见 `main.py`）：
+
+```bash
 python main.py --config workflow_config_master_Alpha158.yaml
 ```
 
-**Step 3 — Backtest only** (skip training, load existing checkpoints)
-
-```bash
-python main.py --only_backtest
-```
-
-This loads `model/csi300master_0.pkl`, `model/csi300master_1.pkl`, `model/csi300master_2.pkl` and runs the qlib workflow (signal + portfolio analysis) without retraining.
+训练产物在 `model/`；qlib 会记录信号与回测指标。仅回测已训练模型可加 `--only_backtest`。
 
 ---
 
-## What `main.py` outputs
+## Training output explained
 
-### During training (each epoch)
+Each epoch prints:
 ```
-Epoch 5, train_loss 0.9987, valid ic 0.0318, icir 0.423, rankic 0.0291, rankicir 0.395.
+Epoch 15, train_loss 0.998551, val_loss 0.999919 | IC 0.0312, ICIR 0.421, RankIC 0.0287, RankICIR 0.398
 ```
 
 | Column | Meaning |
 |--------|---------|
-| `train_loss` | MSE on training data (z-scored labels; starts near 1.0, normal) |
-| `valid ic` | Mean daily IC on the validation set |
-| `icir` | IC / std(IC) — consistency of the IC signal |
-| `rankic` | Mean daily Rank IC (Spearman, more robust to outliers) |
-| `rankicir` | Rank IC / std(Rank IC) |
+| `train_loss` | MSE loss on training data (z-scored labels, so ~1.0 at the start is normal) |
+| `val_loss` | Same loss on the validation set |
+| `IC` | Information Coefficient — daily Pearson correlation between predicted scores and actual next-day returns, averaged across all validation days. Higher is better. Meaningful at > 0.02, strong at > 0.05 |
+| `ICIR` | IC ÷ std(IC) — how consistent the IC is day-to-day (like a Sharpe ratio). Good at > 0.3 |
+| `RankIC` | Same as IC but using rank-correlation (Spearman), more robust to outliers |
+| `RankICIR` | Consistency of RankIC |
 
-### After training — qlib signal analysis (`SigAnaRecord`)
+Early epochs will show IC near 0. You expect it to start rising after ~10 epochs.
 
-For each seed, the following metrics are printed and saved in the qlib experiment recorder:
+---
 
-| Metric | Meaning |
-|--------|---------|
-| `IC` | Mean daily Pearson correlation between model scores and actual returns (test period). Meaningful > 0.02, strong > 0.05 |
-| `ICIR` | IC ÷ std(IC). Good > 0.3. Measures how consistent the signal is over time |
-| `Rank IC` | Same as IC but Spearman (rank-based). More robust to outlier returns |
-| `Rank ICIR` | Rank IC ÷ std(Rank IC) |
+## Predictions CSV explained
 
-### After training — qlib portfolio backtest (`PortAnaRecord`)
+`predictions.csv` contains the model's output score for every stock on every day in the test period.
 
-The backtest uses `TopkDropoutStrategy`: every day, hold the **top 30 stocks** by model score, replacing stocks that drop out of the top 30.
-
-Key backtest metrics:
-
-| Metric | Meaning |
-|--------|---------|
-| `1day.excess_return_without_cost.annualized_return` | Annualised alpha return vs benchmark (CSI 300). Positive = outperformed the index |
-| `1day.excess_return_without_cost.information_ratio` | Annualised IR of the daily excess return. > 1.0 is considered good |
-
-> **Without transaction costs**: the backtest above ignores commissions and slippage. Real performance will be lower due to turnover costs.
-
-### Summary across seeds
-
-After all 3 seeds, a summary is printed:
 ```
-Summary (mean ± std across 3 seeds):
-  IC: 0.0341 ± 0.0023
-  ICIR: 0.4512 ± 0.0187
-  Rank IC: 0.0312 ± 0.0019
-  Rank ICIR: 0.4221 ± 0.0201
-  1day.excess_return_without_cost.annualized_return: 0.1523 ± 0.0312
-  1day.excess_return_without_cost.information_ratio: 1.2341 ± 0.1823
+datetime,instrument,0
+2025-01-02,SH600000,0.0452
+2025-01-02,SZ000001,-0.0231
+2025-01-02,BJ430090,0.0187
+...
+2026-03-20,SH600000,0.0318   ← last trading day, first stock
+2026-03-20,SZ000001,-0.0089
+2026-03-20,BJ430090,0.0201   ← last row: last stock on the last test day
 ```
+
+- **Each row** = one stock on one trading day
+- **The score** is a relative ranking signal, not a raw return prediction. A higher score means the model thinks this stock will outperform the others on the next trading day
+- **How to use it**: rank all stocks by score on a given date — top-ranked stocks are the model's buy candidates for that day
+- **The last row** has no special meaning; it is simply the last stock alphabetically on the last date in the test set
+
+---
+
+## Run modes (`main.py`)
+
+| Mode | Command | Use case |
+|------|---------|----------|
+| Train + workflow (default) | `python main.py --config …` | 训练并在 qlib 里做信号分析与回测 |
+| 仅回测 | `python main.py --config … --only_backtest` | 跳过训练，加载已有 `model/*.pkl` 再跑记录器 |
+
+训练后 checkpoint 路径形如：`model/<market>master_<seed>.pkl`（与 YAML 里 `market`、`seed` 一致）。
+
+---
+
+## Features
+
+The model uses 10 features computed from your raw price/volume data:
+
+| Feature | Formula | What it captures |
+|---------|---------|-----------------|
+| `OPEN_RET` | `open / prev_close - 1` | Overnight gap |
+| `HIGH_RET` | `high / prev_close - 1` | Intraday upside |
+| `LOW_RET` | `low / prev_close - 1` | Intraday downside |
+| `CLOSE_RET` | `close / prev_close - 1` | Daily return |
+| `VWAP_RET` | `vwap / prev_close - 1` | Volume-weighted return |
+| `LOG_VOL` | `log(volume + 1)` | Trading activity |
+| `LOG_AMT` | `log(amount + 1)` | Trading value |
+| `INTRADAY` | `(close - low) / (high - low)` | Where price closed within the day's range |
+| `MOM5` | `close[-1] / close[-6] - 1` | 5-day momentum |
+| `MOM10` | `close[-1] / close[-11] - 1` | 10-day momentum |
+
+**Label**: next trading day's return (`close[+1] / close[0] - 1`)
+
+All features are normalised using `RobustZScoreNorm` (clip outliers at ±3σ) fitted on the training period, then applied consistently to validation and test.
 
 ---
 
 ## Model architecture
 
 ```
-Input: (N stocks, T=8 days, 158 Alpha158 features)
+Input: (N stocks, T=8 days, 10 features)
     │
-    ├─ [Optional Gate]       Market-guided feature selection (disabled — no market index data)
-    ├─ Linear projection     158 → 256 (d_model)
-    ├─ Positional Encoding   adds day-position signal (sinusoidal)
-    ├─ Temporal Attention    each stock attends to its own past 8 days
-    ├─ Spatial Attention     stocks attend to each other (cross-sectional)
-    ├─ Temporal Aggregation  compress 8 time steps → 1 vector (weighted by last-day query)
-    └─ Linear decoder        256 → 1 score per stock
+    ├─ Linear projection       10 → 256 (d_model)
+    ├─ Positional Encoding     adds day-position signal
+    ├─ Temporal Attention      each stock learns from its own past 8 days
+    ├─ Spatial Attention       stocks learn from each other (cross-sectional)
+    ├─ Temporal Aggregation    compress 8 time steps → 1 vector
+    └─ Linear decoder          256 → 1 score per stock
 ```
 
-**Gate note**: the original MASTER uses 63 market-index features (CSI 300/500/903 technical factors) to adaptively gate the 158 Alpha158 features. Since we use only standard qlib data without a separate market-index handler, the Gate is disabled (`gate_input_start_index == gate_input_end_index == 158`). The model still runs the full temporal + spatial attention pipeline.
+The original MASTER also has a market-information Gate (uses CSI300 index features to weight the 158 Alpha158 stock factors). Since our data does not include a separate market index, the Gate is disabled and all 10 features are used directly.
 
 ---
 
-## Features: Alpha158
+## Adapations from the original repo
 
-Alpha158 is qlib's built-in set of **158 standard financial factors** automatically computed from raw OHLCV data. They cover:
+This project is based on `qlib-update/pytorch_master_ts.py` from the original MASTER repo, with these changes:
 
-- **Return features**: 5/10/20/30/60-day close/open/high/low/vwap returns and their ratios
-- **Volatility features**: rolling standard deviations of returns at various windows
-- **Volume features**: rolling mean/std of volume and amount ratios
-- **Momentum features**: various cross-period return comparisons
-- **Technical features**: RSI, Bollinger-band-like ratios, intraday range
+1. **Absolute imports** — changed `from ...data.dataset import DatasetH` to `from qlib.data.dataset import DatasetH` so the file works as a standalone script without being installed inside the qlib package.
 
-All 158 features are normalised with `RobustZScoreNorm` (fitted on the training period only, applied consistently to validation and test to prevent data leakage).
+2. **No-gate mode** — the Gate is skipped when `gate_input_start_index == gate_input_end_index` (our default), since we have no market-index features.
 
-**Label**: 5-day forward return — `Ref($close, -2) / Ref($close, -1) - 1`, cross-sectionally rank-normalised (`CSRankNorm`) during training.
+3. **Validation bug fix** (from qlib-update) — validation now correctly uses `infer_processors` (`DK_I`) to apply normalisation statistics fitted only on training data, preventing data leakage.
 
----
+4. **10-feature handler** — replaced `Alpha158` (158 engineered factors) with a lightweight `DataHandlerLP` using 10 OHLCV-derived features that work with any standard qlib binary dataset.
 
-## Config overview (`workflow_config_master_Alpha158.yaml`)
-
-```yaml
-qlib_init:
-    provider_uri: ~/Desktop/my_qlib_data   # ← your local data path
-
-market: csi300
-benchmark: SH000300
-
-data_handler_config:
-    start_time: 2010-01-01
-    end_time:   2026-03-20
-    fit_start_time: 2010-01-01             # normalisation fitted on this window only
-    fit_end_time:   2014-12-31
-    learn_processors: [DropnaLabel, CSRankNorm]   # training labels
-    infer_processors: [RobustZScoreNorm, Fillna]  # test features
-
-task:
-    model:
-        class: MASTERModel
-        module_path: master_model          # local bridge module
-        kwargs:
-            d_feat: 158                    # Alpha158
-            gate_input_start_index: 158    # gate disabled (= d_feat)
-            gate_input_end_index: 158
-            n_epochs: 40
-            lr: 0.000008
-            train_stop_loss_thred: 0.95
-
-    dataset:
-        class: TSDatasetH
-        kwargs:
-            segments:
-                train: [2010-01-01, 2014-12-31]
-                valid: [2015-01-01, 2016-12-31]
-                test:  [2017-01-01, 2026-03-20]
-            step_len: 8                    # 8-day lookback window
-
-port_analysis_config:
-    strategy: TopkDropoutStrategy (top 30 stocks, daily rebalance)
-    backtest: 2017-01-01 to 2026-03-20, benchmark SH000300
-```
-
----
-
-## qlib Experiment Records
-
-The workflow stores all results using qlib's `R` (Recorder). Each seed creates an experiment named `workflow_seed{seed}` under `~/.qlib/mlruns/`. You can inspect results with:
-
-```bash
-# List all experiments
-mlflow ui   # then open http://localhost:5000
-```
-
-Or access programmatically:
-```python
-from qlib.workflow import R
-with R.start(experiment_name="workflow_seed0"):
-    recorder = R.get_recorder()
-    metrics = recorder.list_metrics()
-    predictions = recorder.load_object("pred.pkl")
-```
-
----
-
-## Integration design
-
-This project integrates two separate author repositories without modifying any author code:
-
-| Source | Files used | Role |
-|--------|-----------|------|
-| [SJTU-DMTai/MASTER](https://github.com/SJTU-DMTai/MASTER) | `master.py`, `base_model.py` | Neural network architecture + standalone training utilities |
-| [SJTU-DMTai/qlib examples/benchmarks/MASTER](https://github.com/SJTU-DMTai/qlib/tree/fbd067c0f0a58a9ba0399c5334d588f7f30c9b10/examples/benchmarks/MASTER) | `main.py` structure, `workflow_config_master_Alpha158.yaml` | qlib workflow running approach |
-| This repo | `master_model.py` | Bridge: imports `MASTER` from `master.py`, adds qlib `Model` interface |
+5. **IC/ICIR/RankIC/RankICIR logged each epoch** — more informative than MSE loss alone for stock prediction tasks.
