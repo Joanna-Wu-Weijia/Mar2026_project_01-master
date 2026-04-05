@@ -10,8 +10,8 @@ benchmark: &benchmark sh000300
 
 # RobustZScoreNorm fit window (anchors for processors below). Do not put these on DataHandlerLP —
 # recent qlib passes unknown kwargs to DataHandler, which does not accept fit_*.
-fit_start: &fit_start 2010-01-04
-fit_end:   &fit_end   2022-12-31
+fit_start: &fit_start 2010-01-03
+fit_end:   &fit_end   2026-03-20
 
 # ---------------------------------------------------------------------------
 # Data handler — 10 features derived from the available binary fields
