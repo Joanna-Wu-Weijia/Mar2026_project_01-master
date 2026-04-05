@@ -29,10 +29,6 @@ from qlib.utils import init_instance_by_config
 from master_model import MASTERModel, DailyBatchSamplerRandom
 
 
-# ---------------------------------------------------------------------------
-# Feature definitions — built from the 10 available binary fields:
-#   close, open, high, low, volume, amount, change, factor, vwap, adjclose
-# ---------------------------------------------------------------------------
 DEFAULT_FEATURE_FIELDS = [
     "$open/Ref($close,1)-1",
     "$high/Ref($close,1)-1",
