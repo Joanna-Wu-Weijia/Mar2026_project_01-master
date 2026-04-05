@@ -1,18 +1,3 @@
-"""
-run_qlib.py
-
-Two ways to run:
-  1. Pass a YAML config file (recommended — mirrors the qlib workflow):
-       python run_qlib.py --config workflow_config_master.yaml
-
-  2. Pass CLI arguments directly (overrides YAML values when both given):
-       python run_qlib.py --data_path ~/Desktop/my_qlib_data --instrument csi300
-
-For the full qlib workflow (with experiment tracking and portfolio back-test),
-you can also use qrun directly:
-    PYTHONPATH=. qrun workflow_config_master.yaml
-"""
-
 import argparse
 import os
 
