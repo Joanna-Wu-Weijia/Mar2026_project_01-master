@@ -7,45 +7,35 @@ from torch.utils.data import Sampler
 import torch
 import torch.optim as optim
 
-
 def calc_ic(pred, label):
-    df = pd.DataFrame({'pred': pred, 'label': label})
+    df = pd.DataFrame({'pred':pred, 'label':label})
     ic = df['pred'].corr(df['label'])
     ric = df['pred'].corr(df['label'], method='spearman')
     return ic, ric
 
-
 def zscore(x):
-    return (x - x.mean()) / (x.std(unbiased=False) + 1e-8)
-
+    return (x - x.mean()).div(x.std())
 
 def drop_extreme(x):
     sorted_tensor, indices = x.sort()
     N = x.shape[0]
-    percent_2_5 = int(0.025 * N)
-    # Use [k : N-k] — when k==0, indices[0:-0] is an empty slice.
-    filtered_indices = indices[percent_2_5 : N - percent_2_5]
+    percent_2_5 = int(0.025*N)
+    # Exclude top 2.5% and bottom 2.5% values
+    filtered_indices = indices[percent_2_5:-percent_2_5]
     mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
     mask[filtered_indices] = True
     return mask, x[mask]
 
-
 def drop_na(x):
     mask = ~x.isnan()
     return mask, x[mask]
-
-
-def _qlib_sample_index(data_source):
-    gi = getattr(data_source, "get_index", None)
-    return gi() if callable(gi) else data_source.index
-
 
 class DailyBatchSamplerRandom(Sampler):
     def __init__(self, data_source, shuffle=False):
         self.data_source = data_source
         self.shuffle = shuffle
         # calculate number of samples in each batch
-        self.daily_count = pd.Series(index=_qlib_sample_index(self.data_source)).groupby("datetime").size().values
+        self.daily_count = pd.Series(index=self.data_source.get_index()).groupby("datetime").size().values
         self.daily_index = np.roll(np.cumsum(self.daily_count), 1)  # calculate begin index of each batch
         self.daily_index[0] = 0
 
@@ -63,8 +53,8 @@ class DailyBatchSamplerRandom(Sampler):
         return len(self.data_source)
 
 
-class SequenceModel:
-    def __init__(self, n_epochs, lr, GPU=None, seed=None, train_stop_loss_thred=None, save_path='model/', save_prefix=''):
+class SequenceModel():
+    def __init__(self, n_epochs, lr, GPU=None, seed=None, train_stop_loss_thred=None, save_path = 'model/', save_prefix= ''):
         self.n_epochs = n_epochs
         self.lr = lr
         self.device = torch.device(f"cuda:{GPU}" if torch.cuda.is_available() else "cpu")
@@ -84,6 +74,7 @@ class SequenceModel:
         self.save_path = save_path
         self.save_prefix = save_prefix
 
+
     def init_model(self):
         if self.model is None:
             raise ValueError("model has not been initialized")
@@ -93,7 +84,7 @@ class SequenceModel:
 
     def loss_fn(self, pred, label):
         mask = ~torch.isnan(label)
-        loss = (pred[mask] - label[mask]) ** 2
+        loss = (pred[mask]-label[mask])**2
         return torch.mean(loss)
 
     def train_epoch(self, data_loader):
@@ -106,18 +97,20 @@ class SequenceModel:
             data.shape: (N, T, F)
             N - number of stocks
             T - length of lookback_window, 8
-            F - features + 1 label
+            F - 158 factors + 63 market information + 1 label
             '''
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1].to(self.device)
 
+
+            # Additional process on labels
+            # If you use original data to train, you won't need the following lines because we already drop extreme when we dumped the data.
+            # If you use the opensource data to train, use the following lines to drop extreme labels.
+            #########################
             mask, label = drop_extreme(label)
-            if label.numel() < 2:
-                continue
             feature = feature[mask, :, :]
-            label = zscore(label)  # CSZscoreNorm
-            if not torch.all(torch.isfinite(label)):
-                continue
+            label = zscore(label) # CSZscoreNorm
+            #########################
 
             pred = self.model(feature.float())
             loss = self.loss_fn(pred, label)
@@ -128,10 +121,6 @@ class SequenceModel:
             torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
             self.train_optimizer.step()
 
-        if not losses:
-            raise RuntimeError(
-                "No training batches had valid labels after filtering; check data/labels."
-            )
         return float(np.mean(losses))
 
     def test_epoch(self, data_loader):
@@ -143,6 +132,10 @@ class SequenceModel:
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1].to(self.device)
 
+            # Note the difference:
+            # 1) The qlib.DropnaLabel drop **samples** according to label.
+            # 2) Here we use all samples to compute the inter-stock correlation, but only drop the na labels to compute metrics (loss, etc.).
+            # 3) If you already used qlib.DropnaLabel to process the validation data, this will do nothing.
             mask, label = drop_na(label)
             label = zscore(label)
 
@@ -169,18 +162,17 @@ class SequenceModel:
             self.fitted = step
             if dl_valid:
                 predictions, metrics = self.predict(dl_valid)
-                print("Epoch %d, train_loss %.6f, valid ic %.4f, icir %.3f, rankic %.4f, rankicir %.3f." % (
-                    step, train_loss, metrics['IC'], metrics['ICIR'], metrics['RIC'], metrics['RICIR']))
-            else:
-                print("Epoch %d, train_loss %.6f" % (step, train_loss))
+                print("Epoch %d, train_loss %.6f, valid ic %.4f, icir %.3f, rankic %.4f, rankicir %.3f." % (step, train_loss, metrics['IC'],  metrics['ICIR'],  metrics['RIC'],  metrics['RICIR']))
+            else: print("Epoch %d, train_loss %.6f" % (step, train_loss))
 
-            if self.train_stop_loss_thred is not None and train_loss <= self.train_stop_loss_thred:
+            if train_loss <= self.train_stop_loss_thred:
                 best_param = copy.deepcopy(self.model.state_dict())
                 torch.save(best_param, f'{self.save_path}/{self.save_prefix}_{self.seed}.pkl')
                 break
 
+
     def predict(self, dl_test):
-        if self.fitted == -1:
+        if self.fitted<0:
             raise ValueError("model is not fitted yet!")
         else:
             print('Epoch:', self.fitted)
@@ -197,6 +189,9 @@ class SequenceModel:
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1]
 
+            # nan label will be automatically ignored when compute metrics.
+            # zscorenorm will not affect the results of ranking-based metrics.
+
             with torch.no_grad():
                 pred = self.model(feature.float()).detach().cpu().numpy()
             preds.append(pred.ravel())
@@ -205,13 +200,13 @@ class SequenceModel:
             ic.append(daily_ic)
             ric.append(daily_ric)
 
-        predictions = pd.Series(np.concatenate(preds), index=_qlib_sample_index(dl_test))
+        predictions = pd.Series(np.concatenate(preds), index=dl_test.get_index())
 
         metrics = {
             'IC': np.mean(ic),
-            'ICIR': np.mean(ic) / np.std(ic),
+            'ICIR': np.mean(ic)/np.std(ic),
             'RIC': np.mean(ric),
-            'RICIR': np.mean(ric) / np.std(ric)
+            'RICIR': np.mean(ric)/np.std(ric)
         }
 
         return predictions, metrics
