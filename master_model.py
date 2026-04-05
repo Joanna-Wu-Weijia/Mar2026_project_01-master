@@ -1,11 +1,3 @@
-# Integration bridge between the two author repositories:
-#   - Neural network architecture : SJTU-DMTai/MASTER  (master.py / base_model.py)
-#   - qlib workflow running approach: SJTU-DMTai/qlib   (main.py / workflow_config_master_Alpha158.yaml)
-#
-# This file imports the MASTER nn.Module from master.py (author's exact code, unchanged)
-# and wraps it with a qlib-compatible Model interface so that the standard qlib workflow
-# (R.start, SignalRecord, SigAnaRecord, PortAnaRecord) can use it directly.
-
 import copy
 import numpy as np
 import pandas as pd

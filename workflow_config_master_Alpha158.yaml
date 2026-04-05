@@ -1,20 +1,3 @@
-# MASTER workflow configuration — Alpha158 features
-#
-# Based on SJTU-DMTai/qlib  examples/benchmarks/MASTER/workflow_config_master_Alpha158.yaml
-# (commit fbd067c0f0a58a9ba0399c5334d588f7f30c9b10)
-#
-# Adaptations for this repository
-# ────────────────────────────────
-# • provider_uri  → our local data folder  (~/Desktop/my_qlib_data)
-# • Date ranges   → aligned with available data (2010-2026)
-# • module_path   → master_model  (local bridge, no custom qlib fork needed)
-# • Gate disabled → gate_input_start_index == gate_input_end_index == 158
-#   (no separate market-index handler; Alpha158 features only)
-#
-# Usage:
-#   python main.py --config workflow_config_master_Alpha158.yaml
-#   python main.py --config workflow_config_master_Alpha158.yaml --only_backtest
-
 qlib_init:
     provider_uri: ~/Desktop/my_qlib_data
     region: cn
