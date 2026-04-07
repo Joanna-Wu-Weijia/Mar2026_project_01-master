@@ -1,0 +1,161 @@
+diff --git a/__pycache__/master_model.cpython-310.pyc b/__pycache__/master_model.cpython-310.pyc
+index d4ccaf6..5d35a4b 100644
+Binary files a/__pycache__/master_model.cpython-310.pyc and b/__pycache__/master_model.cpython-310.pyc differ
+diff --git a/base_model.py b/base_model.py
+index 6fbaaa0..bef5d2d 100644
+--- a/base_model.py
++++ b/base_model.py
+@@ -8,13 +8,22 @@ import torch
+ import torch.optim as optim
+ 
+ def calc_ic(pred, label):
+-    df = pd.DataFrame({'pred':pred, 'label':label})
+-    ic = df['pred'].corr(df['label'])
+-    ric = df['pred'].corr(df['label'], method='spearman')
++    df = pd.DataFrame(
++        {"pred": np.asarray(pred, dtype=np.float64).ravel(), "label": np.asarray(label, dtype=np.float64).ravel()}
++    )
++    df = df.replace([np.inf, -np.inf], np.nan).dropna()
++    if len(df) < 2:
++        return np.nan, np.nan
++    ic = df["pred"].corr(df["label"])
++    ric = df["pred"].corr(df["label"], method="spearman")
+     return ic, ric
+ 
+-def zscore(x):
+-    return (x - x.mean()).div(x.std())
++def zscore(x, eps=1e-8):
++    """Cross-sectional z-score; avoids NaN when N=1 (PyTorch default std() is NaN for a scalar)."""
++    if x.numel() == 0:
++        return x
++    std = torch.std(x, unbiased=False).clamp(min=eps)
++    return (x - x.mean()) / std
+ 
+ def drop_extreme(x):
+     sorted_tensor, indices = x.sort()
+diff --git a/master_model.py b/master_model.py
+index c38bb62..9b3bd24 100644
+--- a/master_model.py
++++ b/master_model.py
+@@ -108,7 +108,10 @@ class MASTERModel(Model):
+     # ── Loss ─────────────────────────────────────────────────────────────────
+ 
+     def loss_fn(self, pred, label):
+-        mask = ~torch.isnan(label)
++        pred = pred.squeeze()
++        mask = torch.isfinite(label) & torch.isfinite(pred)
++        if not mask.any():
++            return torch.tensor(float("nan"), device=pred.device, dtype=pred.dtype)
+         loss = (pred[mask] - label[mask]) ** 2
+         return torch.mean(loss)
+ 
+@@ -135,13 +138,17 @@ class MASTERModel(Model):
+             #########################
+             mask, label = drop_extreme(label)
+             feature = feature[mask, :, :]
+-            nan_mask, label = drop_na(label)  # must drop NaN before zscore, else NaN propagates
++            nan_mask, label = drop_na(label)
+             feature = feature[nan_mask, :, :]
++            if label.numel() == 0:
++                continue
+             label = zscore(label)  # CSZscoreNorm
+             #########################
+ 
+             pred = self.model(feature.float())
+             loss = self.loss_fn(pred, label)
++            if not torch.isfinite(loss):
++                continue
+             losses.append(loss.item())
+ 
+             self.train_optimizer.zero_grad()
+@@ -149,7 +156,7 @@ class MASTERModel(Model):
+             torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
+             self.train_optimizer.step()
+ 
+-        return float(np.mean(losses))
++        return float(np.mean(losses)) if losses else float("nan")
+ 
+     def test_epoch(self, data_loader):
+         self.model.eval()
+@@ -160,18 +167,21 @@ class MASTERModel(Model):
+             feature = data[:, :, 0:-1].to(self.device)
+             label = data[:, -1, -1].to(self.device)
+ 
+-            # Note the difference:
+-            # 1) The qlib.DropnaLabel drop **samples** according to label.
+-            # 2) Here we use all samples to compute the inter-stock correlation, but only drop the na labels to compute metrics (loss, etc.).
+-            # 3) If you already used qlib.DropnaLabel to process the validation data, this will do nothing.
+-            mask, label = drop_na(label)
++            # Align with train: drop_extreme → drop_na → zscore; skip empty days.
++            mask, label = drop_extreme(label)
++            feature = feature[mask, :, :]
++            nan_mask, label = drop_na(label)
++            feature = feature[nan_mask, :, :]
++            if label.numel() == 0:
++                continue
+             label = zscore(label)
+ 
+             pred = self.model(feature.float())
+-            loss = self.loss_fn(pred[mask], label)
+-            losses.append(loss.item())
++            loss = self.loss_fn(pred, label)
++            if torch.isfinite(loss):
++                losses.append(loss.item())
+ 
+-        return float(np.mean(losses))
++        return float(np.mean(losses)) if losses else float("nan")
+ 
+     # ── Data loader ──────────────────────────────────────────────────────────
+ 
+@@ -261,10 +271,16 @@ class MASTERModel(Model):
+             np.concatenate(preds),
+             index=data_loader.sampler.data_source.get_index(),
+         )
++        ic_a = np.asarray(ic, dtype=np.float64)
++        ric_a = np.asarray(ric, dtype=np.float64)
++        ic_m = np.nanmean(ic_a)
++        ric_m = np.nanmean(ric_a)
++        ic_std = np.nanstd(ic_a)
++        ric_std = np.nanstd(ric_a)
+         metrics = {
+-            "IC":    np.mean(ic),
+-            "ICIR":  np.mean(ic) / np.std(ic),
+-            "RIC":   np.mean(ric),
+-            "RICIR": np.mean(ric) / np.std(ric),
++            "IC": ic_m,
++            "ICIR": ic_m / ic_std if (np.isfinite(ic_std) and ic_std > 1e-12) else float("nan"),
++            "RIC": ric_m,
++            "RICIR": ric_m / ric_std if (np.isfinite(ric_std) and ric_std > 1e-12) else float("nan"),
+         }
+         return predictions, metrics
+diff --git a/model/csi300master_0.pkl b/model/csi300master_0.pkl
+index 8a46d92..9531745 100644
+Binary files a/model/csi300master_0.pkl and b/model/csi300master_0.pkl differ
+diff --git a/workflow_config_master.yaml b/workflow_config_master.yaml
+index a835a1d..3ae103a 100644
+--- a/workflow_config_master.yaml
++++ b/workflow_config_master.yaml
+@@ -65,6 +65,23 @@ data_handler_config: &data_handler_config
+           kwargs:
+               fields_group: feature
+ 
++# 组合回测（main.py 中 PortAnaRecord 需要）；回测区间与下方 dataset.segments.test 一致
++port_analysis_config: &port_analysis_config
++    strategy:
++        class: TopkDropoutStrategy
++        module_path: qlib.contrib.strategy
++        kwargs:
++            signal: <PRED>
++            topk: 30
++            n_drop: 30
++    backtest:
++        start_time: 2024-12-22
++        end_time: 2026-03-20
++        account: 100000000
++        benchmark: *benchmark
++        exchange_kwargs:
++            deal_price: close
++
+ # ---------------------------------------------------------------------------
+ # Task: model + dataset
+ # Segments: train : valid : test = 3 : 1 : 1 (by calendar span 2020-01-03 … 2026-03-20)

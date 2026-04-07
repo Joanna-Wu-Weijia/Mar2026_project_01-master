@@ -1,4 +1,4 @@
-# MASTER Stock Prediction Model — Local Qlib Data
+# MASTER Stock Prediction Model
 
 This project runs the **MASTER** model (AAAI-2024) on your own local Chinese A-share stock data stored in qlib format.
 
@@ -26,7 +26,7 @@ This project runs the **MASTER** model (AAAI-2024) on your own local Chinese A-s
 | File | Role |
 |------|------|
 | `workflow_config_master.yaml` | **Edit this first** — all settings: data path, date ranges, instrument universe, model hyperparameters |
-| `run_qlib.py` | **Run this** — reads the config, trains the model, saves predictions |
+| `main.py` | **Run this** — loads YAML, trains MASTER, runs qlib signal analysis + backtest |
 | `master_model.py` | MASTER neural network definition and training logic |
 | `base_model.py` | Shared training utilities (loss, sampler, metrics) |
 | `requirements.txt` | Python package dependencies |
@@ -93,20 +93,19 @@ Open `workflow_config_master.yaml` and set:
 - `segments`: train / valid / test split dates
 - `market`: instrument universe (e.g. `csi300`, `csi500`, `all`)
 
-**Step 2 — Run**
+**Step 2 — Run** (from the project directory)
 
 ```bash
-python run_qlib.py --config workflow_config_master.yaml
+python main.py --config workflow_config_master.yaml
 ```
 
-That's it. The script will print training progress, then save:
-- `model/` — the best model checkpoint (`.pkl`)
-- `predictions.csv` — model scores for every stock on every test day
+Alpha158 示例（默认配置名见 `main.py`）：
 
-You can override any config value from the command line without editing the YAML:
 ```bash
-python run_qlib.py --config workflow_config_master.yaml --n_epochs 20 --instrument csi500
+python main.py --config workflow_config_master_Alpha158.yaml
 ```
+
+训练产物在 `model/`；qlib 会记录信号与回测指标。仅回测已训练模型可加 `--only_backtest`。
 
 ---
 
@@ -152,21 +151,14 @@ datetime,instrument,0
 
 ---
 
-## Run modes
+## Run modes (`main.py`)
 
 | Mode | Command | Use case |
 |------|---------|----------|
-| Train + predict (default) | `--mode both` | Full pipeline: train from scratch, then evaluate |
-| Train only | `--mode train` | Train and save checkpoint, skip prediction |
-| Predict only | `--mode predict` | Load a saved checkpoint and generate predictions |
+| Train + workflow (default) | `python main.py --config …` | 训练并在 qlib 里做信号分析与回测 |
+| 仅回测 | `python main.py --config … --only_backtest` | 跳过训练，加载已有 `model/*.pkl` 再跑记录器 |
 
-Predict-only example (after training):
-```bash
-python run_qlib.py --config workflow_config_master.yaml \
-    --mode predict \
-    --model_path model/csi300master_0.pkl \
-    --output_csv predictions.csv
-```
+训练后 checkpoint 路径形如：`model/<market>master_<seed>.pkl`（与 YAML 里 `market`、`seed` 一致）。
 
 ---
 

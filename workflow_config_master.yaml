@@ -1,23 +1,18 @@
-# MASTER configuration file
-#   python run_qlib.py --config workflow_config_master.yaml
-
+# 本地 qlib 数据目录：按你的实际路径改 provider_uri（需含 calendars / features / instruments）
 qlib_init:
-    provider_uri: ~/Desktop/my_qlib_data  
+    provider_uri: ~/Desktop/my_qlib_data
     region: cn
 
 market: &market csi300
 benchmark: &benchmark sh000300
 
-# RobustZScoreNorm fit window (anchors for processors below). Do not put these on DataHandlerLP —
-# recent qlib passes unknown kwargs to DataHandler, which does not accept fit_*.
-fit_start: &fit_start 2010-01-04
-fit_end:   &fit_end   2022-12-31
+fit_start: &fit_start 2020-01-03
+fit_end:   &fit_end   2023-09-24
 
-# ---------------------------------------------------------------------------
-# Data handler — 10 features derived from the available binary fields
-# ---------------------------------------------------------------------------
+
+
 data_handler_config: &data_handler_config
-    start_time: 2010-01-04
+    start_time: 2020-01-03
     end_time: 2026-03-20
     instruments: *market
     data_loader:
@@ -46,11 +41,9 @@ data_handler_config: &data_handler_config
                       - MOM5
                       - MOM10
                 label:
-                    - - "Ref($close,-2)/Ref($close,-1)-1"  # next-day return
+                    - - "Ref($close,-2)/Ref($close,-1)-1"
                     - - LABEL0
             freq: day
-    # infer_processors: used for valid and test sets (DK_I)
-    # fit_start_time / fit_end_time tell RobustZScoreNorm which window to fit on
     infer_processors:
         - class: RobustZScoreNorm
           kwargs:
@@ -61,7 +54,6 @@ data_handler_config: &data_handler_config
         - class: Fillna
           kwargs:
               fields_group: feature
-    # learn_processors: used for training set (DK_L)
     learn_processors:
         - class: RobustZScoreNorm
           kwargs:
@@ -73,8 +65,26 @@ data_handler_config: &data_handler_config
           kwargs:
               fields_group: feature
 
+# 组合回测（main.py 中 PortAnaRecord 需要）；回测区间与下方 dataset.segments.test 一致
+port_analysis_config: &port_analysis_config
+    strategy:
+        class: TopkDropoutStrategy
+        module_path: qlib.contrib.strategy
+        kwargs:
+            signal: <PRED>
+            topk: 30
+            n_drop: 30
+    backtest:
+        start_time: 2024-12-22
+        end_time: 2026-03-20
+        account: 100000000
+        benchmark: *benchmark
+        exchange_kwargs:
+            deal_price: close
+
 # ---------------------------------------------------------------------------
 # Task: model + dataset
+# Segments: train : valid : test = 3 : 1 : 1 (by calendar span 2020-01-03 … 2026-03-20)
 # ---------------------------------------------------------------------------
 task:
     model:
@@ -106,7 +116,7 @@ task:
                 module_path: qlib.data.dataset.handler
                 kwargs: *data_handler_config
             segments:
-                train: [2010-01-04, 2022-12-31]
-                valid: [2023-01-01, 2024-12-31]
-                test:  [2025-01-01, 2026-03-20]
-            step_len: 8                  
+                train: [2020-01-03, 2023-09-24]
+                valid: [2023-09-25, 2024-12-21]
+                test:  [2024-12-22, 2026-03-20]
+            step_len: 8
