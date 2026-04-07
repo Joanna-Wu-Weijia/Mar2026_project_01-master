@@ -21,7 +21,7 @@ def drop_extreme(x):
     N = x.shape[0]
     percent_2_5 = int(0.025*N)
     # Exclude top 2.5% and bottom 2.5% values
-    filtered_indices = indices[percent_2_5:-percent_2_5]
+    filtered_indices = indices[percent_2_5: N - percent_2_5]
     mask = torch.zeros_like(x, device=x.device, dtype=torch.bool)
     mask[filtered_indices] = True
     return mask, x[mask]

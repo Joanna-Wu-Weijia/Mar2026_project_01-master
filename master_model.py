@@ -135,6 +135,8 @@ class MASTERModel(Model):
             #########################
             mask, label = drop_extreme(label)
             feature = feature[mask, :, :]
+            nan_mask, label = drop_na(label)  # must drop NaN before zscore, else NaN propagates
+            feature = feature[nan_mask, :, :]
             label = zscore(label)  # CSZscoreNorm
             #########################
 
