@@ -108,7 +108,10 @@ class MASTERModel(Model):
     # ── Loss ─────────────────────────────────────────────────────────────────
 
     def loss_fn(self, pred, label):
-        mask = ~torch.isnan(label)
+        pred = pred.squeeze()
+        mask = torch.isfinite(label) & torch.isfinite(pred)
+        if not mask.any():
+            return torch.tensor(float("nan"), device=pred.device, dtype=pred.dtype)
         loss = (pred[mask] - label[mask]) ** 2
         return torch.mean(loss)
 
@@ -135,13 +138,17 @@ class MASTERModel(Model):
             #########################
             mask, label = drop_extreme(label)
             feature = feature[mask, :, :]
-            nan_mask, label = drop_na(label)  # must drop NaN before zscore, else NaN propagates
+            nan_mask, label = drop_na(label)
             feature = feature[nan_mask, :, :]
+            if label.numel() == 0:
+                continue
             label = zscore(label)  # CSZscoreNorm
             #########################
 
             pred = self.model(feature.float())
             loss = self.loss_fn(pred, label)
+            if not torch.isfinite(loss):
+                continue
             losses.append(loss.item())
 
             self.train_optimizer.zero_grad()
@@ -149,7 +156,7 @@ class MASTERModel(Model):
             torch.nn.utils.clip_grad_value_(self.model.parameters(), 3.0)
             self.train_optimizer.step()
 
-        return float(np.mean(losses))
+        return float(np.mean(losses)) if losses else float("nan")
 
     def test_epoch(self, data_loader):
         self.model.eval()
@@ -160,18 +167,21 @@ class MASTERModel(Model):
             feature = data[:, :, 0:-1].to(self.device)
             label = data[:, -1, -1].to(self.device)
 
-            # Note the difference:
-            # 1) The qlib.DropnaLabel drop **samples** according to label.
-            # 2) Here we use all samples to compute the inter-stock correlation, but only drop the na labels to compute metrics (loss, etc.).
-            # 3) If you already used qlib.DropnaLabel to process the validation data, this will do nothing.
-            mask, label = drop_na(label)
+            # Align with train: drop_extreme → drop_na → zscore; skip empty days.
+            mask, label = drop_extreme(label)
+            feature = feature[mask, :, :]
+            nan_mask, label = drop_na(label)
+            feature = feature[nan_mask, :, :]
+            if label.numel() == 0:
+                continue
             label = zscore(label)
 
             pred = self.model(feature.float())
-            loss = self.loss_fn(pred[mask], label)
-            losses.append(loss.item())
+            loss = self.loss_fn(pred, label)
+            if torch.isfinite(loss):
+                losses.append(loss.item())
 
-        return float(np.mean(losses))
+        return float(np.mean(losses)) if losses else float("nan")
 
     # ── Data loader ──────────────────────────────────────────────────────────
 
@@ -261,10 +271,16 @@ class MASTERModel(Model):
             np.concatenate(preds),
             index=data_loader.sampler.data_source.get_index(),
         )
+        ic_a = np.asarray(ic, dtype=np.float64)
+        ric_a = np.asarray(ric, dtype=np.float64)
+        ic_m = np.nanmean(ic_a)
+        ric_m = np.nanmean(ric_a)
+        ic_std = np.nanstd(ic_a)
+        ric_std = np.nanstd(ric_a)
         metrics = {
-            "IC":    np.mean(ic),
-            "ICIR":  np.mean(ic) / np.std(ic),
-            "RIC":   np.mean(ric),
-            "RICIR": np.mean(ric) / np.std(ric),
+            "IC": ic_m,
+            "ICIR": ic_m / ic_std if (np.isfinite(ic_std) and ic_std > 1e-12) else float("nan"),
+            "RIC": ric_m,
+            "RICIR": ric_m / ric_std if (np.isfinite(ric_std) and ric_std > 1e-12) else float("nan"),
         }
         return predictions, metrics

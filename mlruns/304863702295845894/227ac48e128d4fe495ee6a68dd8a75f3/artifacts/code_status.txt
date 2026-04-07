@@ -1,0 +1,18 @@
+On branch Mar_28_newbranch
+Your branch is up to date with 'origin/Mar_28_newbranch'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   __pycache__/master_model.cpython-310.pyc
+	modified:   base_model.py
+	modified:   master_model.py
+	modified:   model/csi300master_0.pkl
+	modified:   workflow_config_master.yaml
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	mlruns/
+	run_qlib.py
+
+no changes added to commit (use "git add" and/or "git commit -a")

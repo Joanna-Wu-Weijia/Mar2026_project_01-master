@@ -1,0 +1,14 @@
+artifact_uri: file:///Users/apple/Desktop/2026 proj_01/S3-practice/Mar2026_project_01-master/mlruns/304863702295845894/227ac48e128d4fe495ee6a68dd8a75f3/artifacts
+end_time: 1775544280958
+entry_point_name: ''
+experiment_id: '304863702295845894'
+lifecycle_stage: active
+run_id: 227ac48e128d4fe495ee6a68dd8a75f3
+run_name: mlflow_recorder
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1775541469110
+status: 3
+tags: []
+user_id: apple

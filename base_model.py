@@ -8,13 +8,22 @@ import torch
 import torch.optim as optim
 
 def calc_ic(pred, label):
-    df = pd.DataFrame({'pred':pred, 'label':label})
-    ic = df['pred'].corr(df['label'])
-    ric = df['pred'].corr(df['label'], method='spearman')
+    df = pd.DataFrame(
+        {"pred": np.asarray(pred, dtype=np.float64).ravel(), "label": np.asarray(label, dtype=np.float64).ravel()}
+    )
+    df = df.replace([np.inf, -np.inf], np.nan).dropna()
+    if len(df) < 2:
+        return np.nan, np.nan
+    ic = df["pred"].corr(df["label"])
+    ric = df["pred"].corr(df["label"], method="spearman")
     return ic, ric
 
-def zscore(x):
-    return (x - x.mean()).div(x.std())
+def zscore(x, eps=1e-8):
+    """Cross-sectional z-score; avoids NaN when N=1 (PyTorch default std() is NaN for a scalar)."""
+    if x.numel() == 0:
+        return x
+    std = torch.std(x, unbiased=False).clamp(min=eps)
+    return (x - x.mean()) / std
 
 def drop_extreme(x):
     sorted_tensor, indices = x.sort()
